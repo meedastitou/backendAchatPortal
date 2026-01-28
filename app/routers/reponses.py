@@ -356,9 +356,12 @@ async def get_comparaison_dashboard(
     IMPORTANT: Si un même fournisseur répond sur le même article plusieurs fois
     (car l'article est dans différentes DAs) avec la même entête de réponse,
     on n'affiche qu'une seule offre pour éviter les doublons.
+
+    FILTRE: Exclut les articles/DA deja selectionnes ou convertis en BC.
     """
 
     # Récupérer tous les articles avec réponses
+    # Exclure les articles/DA qui ont deja une selection (peu importe le statut)
     query = """
         SELECT
             rd.code_article,
@@ -385,6 +388,11 @@ async def get_comparaison_dashboard(
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
         LEFT JOIN articles_ref ar ON rd.code_article = ar.code_article
         WHERE rd.prix_unitaire_ht IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM selections_articles sa
+              WHERE sa.code_article = rd.code_article
+                AND sa.numero_da = lc.numero_da
+          )
         ORDER BY rd.code_article, rd.prix_unitaire_ht ASC
     """
 
