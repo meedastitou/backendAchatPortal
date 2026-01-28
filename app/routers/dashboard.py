@@ -6,9 +6,15 @@ ROUTER - Dashboard & Statistiques
 
 from fastapi import APIRouter, Depends
 from typing import Optional
+from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.auth.dependencies import get_current_user
-from app.database import execute_query
+from app.database import execute_query, get_db
+from app.models.demandes_achat import DemandeAchat
+from app.models.demandes_cotation import DemandeCotation
+from app.models.fournisseurs import Fournisseur
+from app.models.commandes import Commande
 from app.schemas.dashboard import (
     DashboardStats,
     DashboardStatsDetailed,
@@ -33,38 +39,60 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 # ──────────────────────────────────────────────────────────
 
 @router.get("/stats", response_model=DashboardStats)
-async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
+async def get_dashboard_stats(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     """Obtenir les statistiques principales du dashboard"""
 
-    # Utiliser la vue si elle existe, sinon requêtes individuelles
-    stats = execute_query("SELECT * FROM vue_stats_dashboard", fetch_one=True)
+    # Demandes d'achat actives (statut != 'annule')
+    total_da_actives = db.query(func.count(DemandeAchat.id)).filter(
+        DemandeAchat.statut != 'annule'
+    ).scalar() or 0
 
-    if stats:
-        # sanitize None values coming from the view (coerce to 0)
-        for k, v in stats.items():
-            if v is None:
-                stats[k] = 0
-        return DashboardStats(**stats)
+    # RFQ en attente de réponse
+    rfq_en_attente = db.query(func.count(DemandeCotation.id)).filter(
+        DemandeCotation.statut.in_(['envoye', 'relance_1', 'relance_2', 'relance_3'])
+    ).scalar() or 0
 
-    # Fallback: requêtes individuelles
-    queries = {
-        "total_da_actives": "SELECT COUNT(*) as c FROM demandes_achat WHERE statut != 'annule'",
-        "rfq_en_attente": "SELECT COUNT(*) as c FROM demandes_cotation WHERE statut IN ('envoye', 'relance_1', 'relance_2', 'relance_3')",
-        "rfq_repondues": "SELECT COUNT(*) as c FROM demandes_cotation WHERE statut = 'repondu'",
-        "rfq_rejetees": "SELECT COUNT(*) as c FROM demandes_cotation WHERE statut = 'rejete'",
-        "fournisseurs_actifs": "SELECT COUNT(*) as c FROM fournisseurs WHERE statut = 'actif' AND blacklist = FALSE",
-        "fournisseurs_blacklistes": "SELECT COUNT(*) as c FROM fournisseurs WHERE blacklist = TRUE",
-        "commandes_en_cours": "SELECT COUNT(*) as c FROM commandes WHERE statut IN ('validee', 'envoyee')",
-        "taux_reponse_moyen": "SELECT COALESCE(ROUND(AVG(taux_reponse), 2), 0) as c FROM fournisseurs WHERE nb_total_rfq > 0"
-    }
+    # RFQ répondues
+    rfq_repondues = db.query(func.count(DemandeCotation.id)).filter(
+        DemandeCotation.statut == 'repondu'
+    ).scalar() or 0
 
-    result = {}
-    for key, query in queries.items():
-        row = execute_query(query, fetch_one=True)
-        # ensure we never pass None to the pydantic model
-        result[key] = row["c"] if (row and row.get("c") is not None) else 0
+    # RFQ rejetées
+    rfq_rejetees = db.query(func.count(DemandeCotation.id)).filter(
+        DemandeCotation.statut == 'rejete'
+    ).scalar() or 0
 
-    return DashboardStats(**result)
+    # Fournisseurs actifs (non blacklistés)
+    fournisseurs_actifs = db.query(func.count(Fournisseur.id)).filter(
+        (Fournisseur.statut == 'actif') & (Fournisseur.blacklist == False)
+    ).scalar() or 0
+
+    # Fournisseurs blacklistés
+    fournisseurs_blacklistes = db.query(func.count(Fournisseur.id)).filter(
+        Fournisseur.blacklist == True
+    ).scalar() or 0
+
+    # Commandes en cours
+    commandes_en_cours = db.query(func.count(Commande.id)).filter(
+        Commande.statut.in_(['validee', 'envoyee'])
+    ).scalar() or 0
+
+    # Taux de réponse moyen des fournisseurs
+    taux_reponse_moyen = db.query(func.avg(Fournisseur.taux_reponse)).filter(
+        Fournisseur.nb_total_rfq > 0
+    ).scalar() or 0
+    taux_reponse_moyen = round(float(taux_reponse_moyen), 2) if taux_reponse_moyen else 0
+
+    return DashboardStats(
+        total_da_actives=int(total_da_actives),
+        rfq_en_attente=int(rfq_en_attente),
+        rfq_repondues=int(rfq_repondues),
+        rfq_rejetees=int(rfq_rejetees),
+        fournisseurs_actifs=int(fournisseurs_actifs),
+        fournisseurs_blacklistes=int(fournisseurs_blacklistes),
+        commandes_en_cours=int(commandes_en_cours),
+        taux_reponse_moyen=taux_reponse_moyen
+    )
 
 
 # ──────────────────────────────────────────────────────────
