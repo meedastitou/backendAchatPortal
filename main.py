@@ -22,7 +22,8 @@ from app.routers import (
     rfq_router,
     reponses_router,
     decision_router,
-    bon_commande_router
+    bon_commande_router,
+    selections_router
 )
 
 
@@ -54,7 +55,8 @@ Cette API permet de gérer:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    # allow_origin=settings.CORS_ALLOW_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,6 +74,7 @@ app.include_router(rfq_router, prefix="/api")
 app.include_router(reponses_router, prefix="/api")
 app.include_router(decision_router, prefix="/api")
 app.include_router(bon_commande_router, prefix="/api")
+app.include_router(selections_router, prefix="/api")
 
 
 # ──────────────────────────────────────────────────────────
