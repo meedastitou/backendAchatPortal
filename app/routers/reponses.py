@@ -93,6 +93,7 @@ async def list_reponses(
                 lc.designation_article,
                 lc.marque_souhaitee as marque_demandee,
                 lc.numero_da,
+                lc.quantite_demandee,
                 ar.prix_base as tarif_reference
             FROM reponses_fournisseurs_detail rd
             LEFT JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
@@ -155,6 +156,7 @@ async def get_reponse(
             lc.designation_article,
             lc.marque_souhaitee as marque_demandee,
             lc.numero_da,
+            lc.quantite_demandee,
             ar.prix_base as tarif_reference
         FROM reponses_fournisseurs_detail rd
         LEFT JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
@@ -210,6 +212,7 @@ async def get_reponse_by_rfq(
             lc.designation_article,
             lc.marque_souhaitee as marque_demandee,
             lc.numero_da,
+            lc.quantite_demandee,
             ar.prix_base as tarif_reference
         FROM reponses_fournisseurs_detail rd
         LEFT JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
@@ -408,7 +411,9 @@ async def get_comparaison_dashboard(
                 "designation": row["designation_article"],
                 "marque_demandee": row["marque_souhaitee"],
                 "tarif_reference": row["tarif_reference"],
+                "quantite_demandee": 0,  # Sera la somme des quantites demandees par DA
                 "das": set(),
+                "das_quantites": {},  # Pour stocker quantite par DA: numero_da -> quantite
                 "offres": [],
                 "offres_keys": {},  # Pour déduplication: (code_fournisseur, reponse_entete_id) -> index
                 "analyse": {
@@ -421,9 +426,14 @@ async def get_comparaison_dashboard(
                 }
             }
 
-        # Ajouter DA (on garde toutes les DAs même si offre dédupliquée)
+        # Ajouter DA et quantite demandee (on garde toutes les DAs même si offre dédupliquée)
         if row["numero_da"]:
             articles_dict[code]["das"].add(row["numero_da"])
+            # Stocker quantite par DA si pas deja fait
+            if row["numero_da"] not in articles_dict[code]["das_quantites"]:
+                qty = float(row["quantite_demandee"]) if row["quantite_demandee"] else 0
+                articles_dict[code]["das_quantites"][row["numero_da"]] = qty
+                articles_dict[code]["quantite_demandee"] += qty
 
         # Clé de déduplication: même fournisseur + même entête réponse = même offre
         offre_key = (row["code_fournisseur"], row["reponse_entete_id"])
@@ -466,9 +476,10 @@ async def get_comparaison_dashboard(
             data["analyse"]["meilleur_fournisseur"] = best_offre["nom_fournisseur"]
             data["analyse"]["meilleur_prix"] = best_offre["prix_unitaire_ht"]
 
-        # Convertir set en list et supprimer offres_keys (pas besoin dans la réponse)
+        # Convertir set en list et supprimer les clés internes (pas besoin dans la réponse)
         data["das"] = list(data["das"])
         del data["offres_keys"]
+        del data["das_quantites"]
         articles.append(data)
 
     # Trier par nombre d'offres décroissant

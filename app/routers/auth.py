@@ -206,3 +206,231 @@ async def list_users(admin: dict = Depends(get_admin_user)):
         "users": [UserResponse(**u) for u in users],
         "total": len(users)
     }
+
+
+# ──────────────────────────────────────────────────────────
+# Admin: Get User by ID
+# ──────────────────────────────────────────────────────────
+
+@router.get("/users/{user_id}", response_model=UserResponse)
+async def get_user(
+    user_id: int,
+    admin: dict = Depends(get_admin_user)
+):
+    """Obtenir un utilisateur par ID (Admin uniquement)"""
+    user = execute_query(
+        """
+        SELECT id, username, email, nom, prenom, role, actif,
+               derniere_connexion, created_at
+        FROM utilisateurs WHERE id = %s
+        """,
+        (user_id,),
+        fetch_one=True
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    return UserResponse(**user)
+
+
+# ──────────────────────────────────────────────────────────
+# Admin: Update User
+# ──────────────────────────────────────────────────────────
+
+@router.put("/users/{user_id}", response_model=UserResponse)
+async def update_user(
+    user_id: int,
+    user_update: UserUpdate,
+    admin: dict = Depends(get_admin_user)
+):
+    """Modifier un utilisateur (Admin uniquement)"""
+    # Vérifier que l'utilisateur existe
+    existing = execute_query(
+        "SELECT * FROM utilisateurs WHERE id = %s",
+        (user_id,),
+        fetch_one=True
+    )
+
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    # Construire la requête de mise à jour dynamiquement
+    update_fields = []
+    params = []
+
+    if user_update.email is not None:
+        # Vérifier que l'email n'est pas déjà utilisé
+        email_check = execute_query(
+            "SELECT id FROM utilisateurs WHERE email = %s AND id != %s",
+            (user_update.email, user_id),
+            fetch_one=True
+        )
+        if email_check:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cet email est déjà utilisé"
+            )
+        update_fields.append("email = %s")
+        params.append(user_update.email)
+
+    if user_update.nom is not None:
+        update_fields.append("nom = %s")
+        params.append(user_update.nom)
+
+    if user_update.prenom is not None:
+        update_fields.append("prenom = %s")
+        params.append(user_update.prenom)
+
+    if user_update.role is not None:
+        update_fields.append("role = %s")
+        params.append(user_update.role.value)
+
+    if user_update.actif is not None:
+        update_fields.append("actif = %s")
+        params.append(user_update.actif)
+
+    if not update_fields:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Aucune modification fournie"
+        )
+
+    params.append(user_id)
+    query = f"UPDATE utilisateurs SET {', '.join(update_fields)} WHERE id = %s"
+    execute_update(query, tuple(params))
+
+    # Récupérer l'utilisateur mis à jour
+    updated = execute_query(
+        """
+        SELECT id, username, email, nom, prenom, role, actif,
+               derniere_connexion, created_at
+        FROM utilisateurs WHERE id = %s
+        """,
+        (user_id,),
+        fetch_one=True
+    )
+
+    return UserResponse(**updated)
+
+
+# ──────────────────────────────────────────────────────────
+# Admin: Toggle User Active Status
+# ──────────────────────────────────────────────────────────
+
+@router.patch("/users/{user_id}/toggle-active")
+async def toggle_user_active(
+    user_id: int,
+    admin: dict = Depends(get_admin_user)
+):
+    """Activer/Désactiver un utilisateur (Admin uniquement)"""
+    # Empêcher l'admin de se désactiver lui-même
+    if user_id == admin["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Vous ne pouvez pas vous désactiver vous-même"
+        )
+
+    user = execute_query(
+        "SELECT id, actif FROM utilisateurs WHERE id = %s",
+        (user_id,),
+        fetch_one=True
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    new_status = not user["actif"]
+    execute_update(
+        "UPDATE utilisateurs SET actif = %s WHERE id = %s",
+        (new_status, user_id)
+    )
+
+    return {
+        "message": f"Utilisateur {'activé' if new_status else 'désactivé'}",
+        "actif": new_status
+    }
+
+
+# ──────────────────────────────────────────────────────────
+# Admin: Reset User Password
+# ──────────────────────────────────────────────────────────
+
+@router.patch("/users/{user_id}/reset-password")
+async def reset_user_password(
+    user_id: int,
+    admin: dict = Depends(get_admin_user)
+):
+    """Réinitialiser le mot de passe d'un utilisateur (Admin uniquement)"""
+    user = execute_query(
+        "SELECT id, username FROM utilisateurs WHERE id = %s",
+        (user_id,),
+        fetch_one=True
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    # Générer un mot de passe temporaire (username + "123")
+    temp_password = f"{user['username']}123"
+    password_hash = get_password_hash(temp_password)
+
+    execute_update(
+        "UPDATE utilisateurs SET password_hash = %s WHERE id = %s",
+        (password_hash, user_id)
+    )
+
+    return {
+        "message": "Mot de passe réinitialisé",
+        "temp_password": temp_password
+    }
+
+
+# ──────────────────────────────────────────────────────────
+# Admin: Delete User
+# ──────────────────────────────────────────────────────────
+
+@router.delete("/users/{user_id}")
+async def delete_user(
+    user_id: int,
+    admin: dict = Depends(get_admin_user)
+):
+    """Supprimer un utilisateur (Admin uniquement)"""
+    # Empêcher l'admin de se supprimer lui-même
+    if user_id == admin["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Vous ne pouvez pas vous supprimer vous-même"
+        )
+
+    user = execute_query(
+        "SELECT id FROM utilisateurs WHERE id = %s",
+        (user_id,),
+        fetch_one=True
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    # Désactiver plutôt que supprimer (soft delete)
+    execute_update(
+        "UPDATE utilisateurs SET actif = FALSE WHERE id = %s",
+        (user_id,)
+    )
+
+    return {"message": "Utilisateur supprimé (désactivé)"}

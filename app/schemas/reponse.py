@@ -55,6 +55,7 @@ class ReponseDetailResponse(ReponseDetailBase):
     designation_article: Optional[str] = None
     marque_demandee: Optional[str] = None
     numero_da: Optional[str] = None
+    quantite_demandee: Optional[float] = None
     # Champ depuis articles_ref (prix maximum d'achat)
     tarif_reference: Optional[float] = None
 

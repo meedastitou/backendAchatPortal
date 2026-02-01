@@ -13,7 +13,8 @@ from app.auth.dependencies import get_current_user
 from app.database import execute_query, execute_insert, execute_update, get_cursor
 
 # Configuration RPA API
-RPA_API_URL = "http://localhost:8001/api/bonne-commande/data"
+from app.config import RPA_API_URL
+
 from app.schemas.selection import (
     SelectionArticleCreate,
     SelectionArticleUpdate,
@@ -564,25 +565,30 @@ async def generer_bc_from_pre_bc(
     """
 
     # Verifier que les selections existent et appartiennent au fournisseur
+    # Joindre avec lignes_cotation pour recuperer marque_demandee
     placeholders = ",".join(["%s"] * len(request.selection_ids))
     query = f"""
-        SELECT sa.*, f.nom_fournisseur, f.email as email_fournisseur, f.telephone as tel_fournisseur
+        SELECT
+            sa.*,
+            f.nom_fournisseur,
+            f.email as email_fournisseur,
+            f.telephone as tel_fournisseur,
+            lc.marque_souhaitee as marque_demandee
         FROM selections_articles sa
         JOIN fournisseurs f ON sa.code_fournisseur = f.code_fournisseur
+        LEFT JOIN reponses_fournisseurs_detail rd ON sa.detail_id = rd.id
+        LEFT JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
         WHERE sa.id IN ({placeholders})
           AND sa.code_fournisseur = %s
           AND sa.statut = 'selectionne'
     """
-    print(00)
     params = tuple(request.selection_ids) + (request.code_fournisseur,)
     selections = execute_query(query, params)
-    print(0)
     if len(selections) != len(request.selection_ids):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Certaines selections sont invalides ou deja converties en BC"
         )
-    print(1)
     # Generer le numero BC
     year = datetime.now().year
     last_bc = execute_query(
@@ -594,13 +600,11 @@ async def generer_bc_from_pre_bc(
         (f"BC-{year}-%",),
         fetch_one=True
     )
-    print(2)
     if last_bc:
         last_num = int(last_bc["numero_bc"].split("-")[-1])
         new_num = last_num + 1
     else:
         new_num = 1
-    print(3)
     numero_bc = f"BC-{year}-{new_num:04d}"
     # Calculer les totaux
     montant_total_ht = sum(
@@ -685,6 +689,12 @@ async def generer_bc_from_pre_bc(
     donnees_rpa = []
 
     for sel in selections:
+        # Si marque conforme -> envoyer marque demandee, sinon marque proposee
+        if sel["marque_conforme"]:
+            marque = sel["marque_demandee"] or sel["marque_proposee"] or ""
+        else:
+            marque = sel["marque_proposee"] or ""
+
         donnees_rpa.append({
             "Numero_DA": sel["numero_da"],
             "Acheteur": acheteur,
@@ -693,7 +703,7 @@ async def generer_bc_from_pre_bc(
             "TEL_Fournisseu": tel_fournisseur or "",
             "Code_Article": sel["code_article"],
             "Montant": float(sel["prix_selectionne"]),
-            "Marque": sel["marque_proposee"] or "",
+            "Marque": marque,
             "Affaire": ""
         })
 
@@ -706,12 +716,11 @@ async def generer_bc_from_pre_bc(
         "email_expediteur": email_acheteur,
         "headless": True  # Mode headless en production
     }
-
+    print(rpa_payload)
     rpa_success = False
     rpa_message = ""
 
     try:
-        print(4)
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 RPA_API_URL,
@@ -728,7 +737,6 @@ async def generer_bc_from_pre_bc(
                 rpa_message = f"Erreur RPA: {response.status_code} - {response.text}"
                 logging.error(f"RPA API error for BC {numero_bc}: {rpa_message}")
                 print(7)
-        print(5)
     except httpx.TimeoutException:
         rpa_message = "Timeout lors de l'appel RPA"
         logging.error(f"RPA API timeout for BC {numero_bc}")
