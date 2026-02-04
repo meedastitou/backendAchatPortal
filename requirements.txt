@@ -26,7 +26,7 @@ starlette==0.35.1
 # Date/Time
 python-dateutil==2.8.2
 pydantic[email]
-bcrypt
+bcrypt==4.0.1
 
 # HTTP Client (pour appels API RPA)
 httpx==0.27.0
