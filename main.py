@@ -23,7 +23,8 @@ from app.routers import (
     reponses_router,
     decision_router,
     bon_commande_router,
-    selections_router
+    selections_router,
+    x3_router
 )
 
 
@@ -75,6 +76,7 @@ app.include_router(reponses_router, prefix="/api")
 app.include_router(decision_router, prefix="/api")
 app.include_router(bon_commande_router, prefix="/api")
 app.include_router(selections_router, prefix="/api")
+app.include_router(x3_router, prefix="/api")
 
 
 # ──────────────────────────────────────────────────────────
