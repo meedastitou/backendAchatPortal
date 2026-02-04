@@ -46,6 +46,30 @@ class Settings(BaseSettings):
     # RPA API
     RPA_API_URL: str = "http://localhost:8001/api/bonne-commande/data"
 
+    # SQL Server (Sage X3)
+    X3_DB_HOST: str = "localhost"
+    X3_DB_PORT: int = 1433
+    X3_DB_NAME: str = "x3"
+    X3_DB_USER: str = ""
+    X3_DB_PASSWORD: str = ""
+    X3_DB_DRIVER: str = "ODBC Driver 17 for SQL Server"
+
+    @property
+    def X3_CONNECTION_STRING(self) -> str:
+        """Connection string ODBC pour SQL Server (Sage X3) - supporte les instances nommées"""
+        # Format: SERVER=host\\instance ou SERVER=host,port
+        server = self.X3_DB_HOST
+        if '\\' not in server and self.X3_DB_PORT != 1433:
+            server = f"{server},{self.X3_DB_PORT}"
+        return (
+            f"DRIVER={{{self.X3_DB_DRIVER}}};"
+            f"SERVER={server};"
+            f"DATABASE={self.X3_DB_NAME};"
+            f"UID={self.X3_DB_USER};"
+            f"PWD={self.X3_DB_PASSWORD};"
+            f"TrustServerCertificate=yes;"
+        )
+
     @property
     def DATABASE_URL(self) -> str:
         """URL de connexion à la base de données"""
