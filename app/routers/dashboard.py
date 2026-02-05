@@ -4,8 +4,9 @@ ROUTER - Dashboard & Statistiques
 ════════════════════════════════════════════════════════════
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from typing import Optional
+from datetime import date
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -93,6 +94,95 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user), db
         commandes_en_cours=int(commandes_en_cours),
         taux_reponse_moyen=taux_reponse_moyen
     )
+
+
+# ──────────────────────────────────────────────────────────
+# Statistiques du jour (aujourd'hui)
+# ──────────────────────────────────────────────────────────
+
+@router.get("/stats/today")
+async def get_today_stats(
+    filter_date: Optional[date] = Query(None, description="Date de filtre (format: YYYY-MM-DD). Si non fournie, utilise la date du jour."),
+    current_user: dict = Depends(get_current_user)
+):
+    """Obtenir les statistiques d'une journee specifique (par defaut aujourd'hui)"""
+
+    # Utiliser la date fournie ou la date du jour
+    if filter_date:
+        date_str = filter_date.strftime('%Y-%m-%d')
+        date_condition = f"= '{date_str}'"
+    else:
+        date_condition = "= CURDATE()"
+
+    # RFQ envoyées ce jour
+    rfq_envoyees = execute_query(
+        f"SELECT COUNT(*) as c FROM demandes_cotation WHERE DATE(date_envoi) {date_condition}",
+        fetch_one=True
+    )
+
+    # Réponses reçues ce jour
+    reponses_recues = execute_query(
+        f"SELECT COUNT(*) as c FROM reponses_fournisseurs_entete WHERE DATE(date_reponse) {date_condition}",
+        fetch_one=True
+    )
+
+    # Rejets reçus ce jour
+    rejets_recus = execute_query(
+        f"SELECT COUNT(*) as c FROM rejets_fournisseurs WHERE DATE(date_rejet) {date_condition}",
+        fetch_one=True
+    )
+
+    # Commandes créées ce jour
+    commandes_creees = execute_query(
+        f"SELECT COUNT(*) as c FROM bons_commande WHERE DATE(date_creation) {date_condition}",
+        fetch_one=True
+    )
+
+    # Montant total des réponses de ce jour
+    # montant_reponses = execute_query(
+    #     f"""
+    #     SELECT COALESCE(SUM(rd.prix_unitaire_ht * lc.quantite_demandee), 0) as c
+    #     FROM reponses_fournisseurs_detail rd
+    #     JOIN reponses_fournisseurs_entete re ON rd.reponse_entete_id = re.id
+    #     JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
+    #     WHERE DATE(re.date_reponse) {date_condition}
+    #     """,
+    #     fetch_one=True
+    # )
+
+    # Nouveaux fournisseurs ajoutés ce jour
+    nouveaux_fournisseurs = execute_query(
+        f"SELECT COUNT(*) as c FROM fournisseurs WHERE DATE(created_at) {date_condition}",
+        fetch_one=True
+    )
+
+    # Articles cotés ce jour (nombre d'articles uniques dans les réponses)
+    articles_cotes = execute_query(
+        f"""
+        SELECT COUNT(DISTINCT rd.code_article) as c
+        FROM reponses_fournisseurs_detail rd
+        JOIN reponses_fournisseurs_entete re ON rd.reponse_entete_id = re.id
+        WHERE DATE(re.date_reponse) {date_condition}
+        """,
+        fetch_one=True
+    )
+
+    # Récupérer la date utilisée
+    if filter_date:
+        result_date = date_str
+    else:
+        result_date = str(execute_query("SELECT CURDATE() as d", fetch_one=True)["d"])
+
+    return {
+        "date": result_date,
+        "rfq_envoyees": rfq_envoyees["c"] if rfq_envoyees else 0,
+        "reponses_recues": reponses_recues["c"] if reponses_recues else 0,
+        "rejets_recus": rejets_recus["c"] if rejets_recus else 0,
+        "commandes_creees": commandes_creees["c"] if commandes_creees else 0,
+        # "montant_reponses": float(montant_reponses["c"]) if montant_reponses else 0,
+        "nouveaux_fournisseurs": nouveaux_fournisseurs["c"] if nouveaux_fournisseurs else 0,
+        "articles_cotes": articles_cotes["c"] if articles_cotes else 0
+    }
 
 
 # ──────────────────────────────────────────────────────────
