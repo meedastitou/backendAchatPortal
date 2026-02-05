@@ -482,6 +482,49 @@ async def get_comparaison_dashboard(
         del data["das_quantites"]
         articles.append(data)
 
+    # Récupérer les fournisseurs en attente pour les articles ayant des offres
+    # (fournisseurs qui ont reçu une RFQ mais n'ont pas encore répondu)
+    if articles_dict:
+        codes_articles = list(articles_dict.keys())
+        placeholders = ",".join(["%s"] * len(codes_articles))
+
+        query_en_attente = f"""
+            SELECT DISTINCT
+                lc.code_article,
+                dc.code_fournisseur,
+                f.nom_fournisseur,
+                dc.date_envoi,
+                dc.statut as statut_rfq
+            FROM lignes_cotation lc
+            JOIN demandes_cotation dc ON lc.rfq_uuid = dc.uuid
+            JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+            LEFT JOIN reponses_fournisseurs_entete re ON dc.uuid = re.rfq_uuid
+            LEFT JOIN rejets_fournisseurs rj ON dc.uuid = rj.rfq_uuid
+            WHERE lc.code_article IN ({placeholders})
+              AND re.id IS NULL
+              AND rj.id IS NULL
+              AND dc.statut = 'envoye'
+        """
+        fournisseurs_attente = execute_query(query_en_attente, tuple(codes_articles))
+
+        # Grouper par article
+        for fa in fournisseurs_attente:
+            code = fa["code_article"]
+            if code in articles_dict:
+                if "fournisseurs_en_attente" not in articles_dict[code]:
+                    articles_dict[code]["fournisseurs_en_attente"] = []
+
+                articles_dict[code]["fournisseurs_en_attente"].append({
+                    "code_fournisseur": fa["code_fournisseur"],
+                    "nom_fournisseur": fa["nom_fournisseur"],
+                    "date_envoi": fa["date_envoi"]
+                })
+
+    # S'assurer que tous les articles ont le champ fournisseurs_en_attente
+    for code in articles_dict:
+        if "fournisseurs_en_attente" not in articles_dict[code]:
+            articles_dict[code]["fournisseurs_en_attente"] = []
+
     # Trier par nombre d'offres décroissant
     articles.sort(key=lambda x: x["analyse"]["nb_offres"], reverse=True)
 
