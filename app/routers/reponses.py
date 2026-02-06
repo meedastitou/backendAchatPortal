@@ -383,6 +383,7 @@ async def get_comparaison_dashboard(
             f.nom_fournisseur,
             re.devise,
             re.date_reponse,
+            re.methodes_paiement,
             ar.prix_base as tarif_reference
         FROM reponses_fournisseurs_detail rd
         JOIN reponses_fournisseurs_entete re ON rd.reponse_entete_id = re.id
@@ -451,7 +452,8 @@ async def get_comparaison_dashboard(
                 "marque_conforme": row["marque_conforme"],
                 "marque_proposee": row["marque_proposee"],
                 "devise": row["devise"],
-                "date_reponse": row["date_reponse"]
+                "date_reponse": row["date_reponse"],
+                "methodes_paiement": row["methodes_paiement"]
             })
         else:
             # Offre déjà présente: sommer la quantité disponible
