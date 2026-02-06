@@ -35,12 +35,15 @@ async def list_rfq(
     date_debut: Optional[datetime] = None,
     date_fin: Optional[datetime] = None,
     search: Optional[str] = None,
+    code_article: Optional[str] = None,
+    numero_da: Optional[str] = None,
     current_user: dict = Depends(get_current_user)
 ):
     """Lister les demandes de cotation avec filtres"""
 
     conditions = ["1=1"]
     params = []
+    join_lignes = False
 
     if statut:
         conditions.append("dc.statut = %s")
@@ -63,13 +66,25 @@ async def list_rfq(
         search_pattern = f"%{search}%"
         params.extend([search_pattern, search_pattern])
 
+    if code_article:
+        join_lignes = True
+        conditions.append("lc.code_article LIKE %s")
+        params.append(f"%{code_article}%")
+
+    if numero_da:
+        join_lignes = True
+        conditions.append("lc.numero_da LIKE %s")
+        params.append(f"%{numero_da}%")
+
     where_clause = " AND ".join(conditions)
+    lignes_join = "JOIN lignes_cotation lc ON dc.uuid = lc.rfq_uuid" if join_lignes else ""
 
     # Count
     count_query = f"""
-        SELECT COUNT(*) as total
+        SELECT COUNT(DISTINCT dc.id) as total
         FROM demandes_cotation dc
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        {lignes_join}
         WHERE {where_clause}
     """
     total = execute_query(count_query, tuple(params), fetch_one=True)["total"]
@@ -77,12 +92,13 @@ async def list_rfq(
     # Get RFQs
     offset = (page - 1) * limit
     query = f"""
-        SELECT
+        SELECT DISTINCT
             dc.*,
             f.nom_fournisseur,
             f.email as email_fournisseur
         FROM demandes_cotation dc
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        {lignes_join}
         WHERE {where_clause}
         ORDER BY dc.date_envoi DESC
         LIMIT %s OFFSET %s
