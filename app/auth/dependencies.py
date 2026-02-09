@@ -46,6 +46,17 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
     return execute_query(query, (user_id,), fetch_one=True)
 
 
+def get_user_familles(user_id: int) -> list[str]:
+    """Récupérer les codes familles assignées à un utilisateur"""
+    query = """
+        SELECT code_famille
+        FROM utilisateur_familles
+        WHERE utilisateur_id = %s
+    """
+    rows = execute_query(query, (user_id,))
+    return [row["code_famille"] for row in rows] if rows else []
+
+
 def authenticate_user(username: str, password: str) -> Optional[dict]:
     """
     Authentifier un utilisateur
@@ -109,6 +120,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
             detail="Compte désactivé"
         )
 
+    # Ajouter les familles de l'utilisateur
+    user["familles"] = get_user_familles(user["id"])
+
     return user
 
 
@@ -162,3 +176,23 @@ async def get_responsable_or_admin(current_user: dict = Depends(get_current_user
             detail="Accès réservé aux responsables achats"
         )
     return current_user
+
+
+# ──────────────────────────────────────────────────────────
+# Filtrage par famille
+# ──────────────────────────────────────────────────────────
+
+def get_user_famille_filter(current_user: dict) -> Optional[list[str]]:
+    """
+    Retourne la liste des familles à filtrer pour l'utilisateur.
+
+    - admin/responsable_achat: None (voit tout)
+    - acheteur: liste de ses familles assignées
+
+    Returns:
+        None si l'utilisateur voit tout, sinon liste de codes familles
+    """
+    if current_user["role"] in ["admin", "responsable_achat"]:
+        return None  # Voit tout
+
+    return current_user.get("familles", [])

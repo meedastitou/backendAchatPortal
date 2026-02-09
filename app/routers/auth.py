@@ -13,7 +13,8 @@ from app.auth.dependencies import (
     get_current_user,
     get_admin_user,
     update_last_login,
-    get_user_by_username
+    get_user_by_username,
+    get_user_familles
 )
 from app.database import execute_query, execute_insert, execute_update
 from app.schemas.auth import (
@@ -434,3 +435,119 @@ async def delete_user(
     )
 
     return {"message": "Utilisateur supprimé (désactivé)"}
+
+
+# ──────────────────────────────────────────────────────────
+# Admin: Gestion des familles utilisateur
+# ──────────────────────────────────────────────────────────
+
+@router.get("/users/{user_id}/familles")
+async def get_user_familles_list(
+    user_id: int,
+    admin: dict = Depends(get_admin_user)
+):
+    """Obtenir les familles assignées à un utilisateur (Admin uniquement)"""
+    user = execute_query(
+        "SELECT id, username, nom, prenom FROM utilisateurs WHERE id = %s",
+        (user_id,),
+        fetch_one=True
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    familles = get_user_familles(user_id)
+
+    # Récupérer les détails des familles
+    familles_details = []
+    if familles:
+        placeholders = ", ".join(["%s"] * len(familles))
+        query = f"""
+            SELECT code_famille, nom_famille
+            FROM familles_ref
+            WHERE code_famille IN ({placeholders})
+        """
+        familles_details = execute_query(query, tuple(familles))
+
+    return {
+        "user_id": user_id,
+        "username": user["username"],
+        "familles": familles_details
+    }
+
+
+@router.put("/users/{user_id}/familles")
+async def set_user_familles(
+    user_id: int,
+    familles: list[str],
+    admin: dict = Depends(get_admin_user)
+):
+    """
+    Définir les familles d'un utilisateur (remplace les existantes)
+
+    Body: ["FAM001", "FAM002", ...]
+    """
+    user = execute_query(
+        "SELECT id, username FROM utilisateurs WHERE id = %s",
+        (user_id,),
+        fetch_one=True
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Utilisateur non trouvé"
+        )
+
+    # Vérifier que les familles existent
+    if familles:
+        placeholders = ", ".join(["%s"] * len(familles))
+        existing = execute_query(
+            f"SELECT code_famille FROM familles_ref WHERE code_famille IN ({placeholders})",
+            tuple(familles)
+        )
+        existing_codes = {f["code_famille"] for f in existing}
+        invalid = set(familles) - existing_codes
+        if invalid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Familles invalides: {', '.join(invalid)}"
+            )
+
+    # Supprimer les anciennes affectations
+    execute_update(
+        "DELETE FROM utilisateur_familles WHERE utilisateur_id = %s",
+        (user_id,)
+    )
+
+    # Ajouter les nouvelles affectations
+    for code_famille in familles:
+        execute_insert(
+            "INSERT INTO utilisateur_familles (utilisateur_id, code_famille) VALUES (%s, %s)",
+            (user_id, code_famille)
+        )
+
+    return {
+        "message": f"{len(familles)} famille(s) assignée(s)",
+        "user_id": user_id,
+        "familles": familles
+    }
+
+
+@router.get("/familles")
+async def list_all_familles(admin: dict = Depends(get_admin_user)):
+    """Lister toutes les familles disponibles (Admin uniquement)"""
+    query = """
+        SELECT code_famille, nom_famille
+        FROM familles_ref
+        ORDER BY nom_famille
+    """
+    familles = execute_query(query)
+
+    return {
+        "familles": familles,
+        "total": len(familles)
+    }

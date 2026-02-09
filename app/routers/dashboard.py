@@ -10,7 +10,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, get_user_famille_filter
 from app.database import execute_query, get_db
 from app.models.demandes_achat import DemandeAchat
 from app.models.demandes_cotation import DemandeCotation
@@ -43,39 +43,104 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 async def get_dashboard_stats(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     """Obtenir les statistiques principales du dashboard"""
 
-    # Demandes d'achat actives (statut != 'annule')
-    total_da_actives = db.query(func.count(DemandeAchat.id)).filter(
-        DemandeAchat.statut != 'annule'
-    ).scalar() or 0
+    # Filtrage par famille pour les acheteurs
+    familles_filter = get_user_famille_filter(current_user)
 
-    # RFQ en attente de réponse
-    rfq_en_attente = db.query(func.count(DemandeCotation.id)).filter(
-        DemandeCotation.statut.in_(['envoye', 'relance_1', 'relance_2', 'relance_3'])
-    ).scalar() or 0
+    if familles_filter is not None and len(familles_filter) == 0:
+        # Acheteur sans famille = tout à zéro
+        return DashboardStats(
+            total_da_actives=0,
+            rfq_en_attente=0,
+            rfq_repondues=0,
+            rfq_rejetees=0,
+            fournisseurs_actifs=0,
+            fournisseurs_blacklistes=0,
+            commandes_en_cours=0,
+            taux_reponse_moyen=0
+        )
 
-    # RFQ répondues
-    rfq_repondues = db.query(func.count(DemandeCotation.id)).filter(
-        DemandeCotation.statut == 'repondu'
-    ).scalar() or 0
+    if familles_filter is not None:
+        # Acheteur avec familles - utiliser SQL brut pour filtrer
+        placeholders = ", ".join(["%s"] * len(familles_filter))
+        famille_join = f"""
+            JOIN lignes_cotation lc ON dc.uuid = lc.rfq_uuid
+            JOIN articles_ref ar ON lc.code_article = ar.code_article
+            AND ar.code_famille IN ({placeholders})
+        """
 
-    # RFQ rejetées
-    rfq_rejetees = db.query(func.count(DemandeCotation.id)).filter(
-        DemandeCotation.statut == 'rejete'
-    ).scalar() or 0
+        # DA actives filtrées par famille
+        da_query = f"""
+            SELECT COUNT(DISTINCT da.id) as total
+            FROM demandes_achat da
+            JOIN articles_ref ar ON da.code_article = ar.code_article
+            WHERE da.statut != 'annule' AND ar.code_famille IN ({placeholders})
+        """
+        total_da_actives = execute_query(da_query, tuple(familles_filter), fetch_one=True)["total"]
 
-    # Fournisseurs actifs (non blacklistés)
+        # RFQ filtrées
+        rfq_attente_query = f"""
+            SELECT COUNT(DISTINCT dc.id) as total
+            FROM demandes_cotation dc
+            {famille_join}
+            WHERE dc.statut IN ('envoye', 'relance_1', 'relance_2', 'relance_3')
+        """
+        rfq_en_attente = execute_query(rfq_attente_query, tuple(familles_filter), fetch_one=True)["total"]
+
+        rfq_repondues_query = f"""
+            SELECT COUNT(DISTINCT dc.id) as total
+            FROM demandes_cotation dc
+            {famille_join}
+            WHERE dc.statut = 'repondu'
+        """
+        rfq_repondues = execute_query(rfq_repondues_query, tuple(familles_filter), fetch_one=True)["total"]
+
+        rfq_rejetees_query = f"""
+            SELECT COUNT(DISTINCT dc.id) as total
+            FROM demandes_cotation dc
+            {famille_join}
+            WHERE dc.statut = 'rejete'
+        """
+        rfq_rejetees = execute_query(rfq_rejetees_query, tuple(familles_filter), fetch_one=True)["total"]
+
+        # Commandes filtrées par famille
+        commandes_query = f"""
+            SELECT COUNT(DISTINCT c.id) as total
+            FROM bons_commande c
+            JOIN lignes_bon_commande lbc ON c.id = lbc.bon_commande_id
+            JOIN articles_ref ar ON lbc.code_article = ar.code_article
+            WHERE c.statut IN ('validee', 'envoyee') AND ar.code_famille IN ({placeholders})
+        """
+        commandes_en_cours = execute_query(commandes_query, tuple(familles_filter), fetch_one=True)["total"]
+
+    else:
+        # Admin/Responsable - requêtes normales via ORM
+        total_da_actives = db.query(func.count(DemandeAchat.id)).filter(
+            DemandeAchat.statut != 'annule'
+        ).scalar() or 0
+
+        rfq_en_attente = db.query(func.count(DemandeCotation.id)).filter(
+            DemandeCotation.statut.in_(['envoye', 'relance_1', 'relance_2', 'relance_3'])
+        ).scalar() or 0
+
+        rfq_repondues = db.query(func.count(DemandeCotation.id)).filter(
+            DemandeCotation.statut == 'repondu'
+        ).scalar() or 0
+
+        rfq_rejetees = db.query(func.count(DemandeCotation.id)).filter(
+            DemandeCotation.statut == 'rejete'
+        ).scalar() or 0
+
+        commandes_en_cours = db.query(func.count(Commande.id)).filter(
+            Commande.statut.in_(['validee', 'envoyee'])
+        ).scalar() or 0
+
+    # Fournisseurs (pas filtrés par famille - info globale)
     fournisseurs_actifs = db.query(func.count(Fournisseur.id)).filter(
         (Fournisseur.statut == 'actif') & (Fournisseur.blacklist == False)
     ).scalar() or 0
 
-    # Fournisseurs blacklistés
     fournisseurs_blacklistes = db.query(func.count(Fournisseur.id)).filter(
         Fournisseur.blacklist == True
-    ).scalar() or 0
-
-    # Commandes en cours
-    commandes_en_cours = db.query(func.count(Commande.id)).filter(
-        Commande.statut.in_(['validee', 'envoyee'])
     ).scalar() or 0
 
     # Taux de réponse moyen des fournisseurs

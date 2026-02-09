@@ -10,7 +10,7 @@ from typing import Optional
 from datetime import datetime, date
 from io import BytesIO
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, get_user_famille_filter
 from app.database import execute_query
 from app.schemas.rfq import (
     RFQResponse,
@@ -46,6 +46,19 @@ async def list_rfq(
     conditions = ["1=1"]
     params = []
     join_lignes = False
+    join_articles = False
+
+    # Filtrage par famille pour les acheteurs
+    familles_filter = get_user_famille_filter(current_user)
+    if familles_filter is not None:
+        if len(familles_filter) == 0:
+            # Acheteur sans famille assignée = ne voit rien
+            return RFQListResponse(rfqs=[], total=0, page=page, limit=limit)
+        join_lignes = True
+        join_articles = True
+        placeholders = ", ".join(["%s"] * len(familles_filter))
+        conditions.append(f"ar.code_famille IN ({placeholders})")
+        params.extend(familles_filter)
 
     if statut:
         conditions.append("dc.statut = %s")
@@ -80,6 +93,7 @@ async def list_rfq(
 
     where_clause = " AND ".join(conditions)
     lignes_join = "JOIN lignes_cotation lc ON dc.uuid = lc.rfq_uuid" if join_lignes else ""
+    articles_join = "JOIN articles_ref ar ON lc.code_article = ar.code_article" if join_articles else ""
 
     # Count
     count_query = f"""
@@ -87,6 +101,7 @@ async def list_rfq(
         FROM demandes_cotation dc
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
         {lignes_join}
+        {articles_join}
         WHERE {where_clause}
     """
     total = execute_query(count_query, tuple(params), fetch_one=True)["total"]
@@ -101,6 +116,7 @@ async def list_rfq(
         FROM demandes_cotation dc
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
         {lignes_join}
+        {articles_join}
         WHERE {where_clause}
         ORDER BY dc.date_envoi DESC
         LIMIT %s OFFSET %s
@@ -157,6 +173,32 @@ async def get_rfq(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="RFQ non trouvée"
         )
+
+    # Vérifier accès par famille pour les acheteurs
+    familles_filter = get_user_famille_filter(current_user)
+    if familles_filter is not None:
+        # Vérifier si au moins un article de cette RFQ appartient aux familles de l'utilisateur
+        if len(familles_filter) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Accès non autorisé à cette RFQ"
+            )
+        placeholders = ", ".join(["%s"] * len(familles_filter))
+        access_check = execute_query(
+            f"""
+            SELECT 1 FROM lignes_cotation lc
+            JOIN articles_ref ar ON lc.code_article = ar.code_article
+            WHERE lc.rfq_uuid = %s AND ar.code_famille IN ({placeholders})
+            LIMIT 1
+            """,
+            (rfq["uuid"], *familles_filter),
+            fetch_one=True
+        )
+        if not access_check:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Accès non autorisé à cette RFQ"
+            )
 
     # Récupérer les lignes
     lignes = execute_query(
