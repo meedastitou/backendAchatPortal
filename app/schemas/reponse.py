@@ -134,3 +134,111 @@ class RejetResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ──────────────────────────────────────────────────────────
+# Saisie Manuelle de Reponse (Tables _acheteur)
+# ──────────────────────────────────────────────────────────
+
+class LigneReponseAcheteur(BaseModel):
+    """Ligne de reponse saisie par l'acheteur - avec info fournisseur par ligne"""
+    code_article: str
+
+    # Fournisseur pour CETTE ligne
+    code_fournisseur: Optional[str] = None
+    nom_fournisseur: str
+    email_fournisseur: str
+    telephone_fournisseur: Optional[str] = None
+
+    # Infos cotation
+    prix_unitaire_ht: Optional[float] = None
+    quantite_disponible: Optional[float] = None
+    delai_livraison_jours: Optional[int] = None
+    date_livraison_prevue: Optional[datetime] = None
+
+    # Marque
+    marque_conforme: Optional[bool] = True
+    marque_proposee: Optional[str] = None
+
+    # Reference fournisseur
+    reference_fournisseur: Optional[str] = None
+
+    # Commentaire
+    commentaire_ligne: Optional[str] = None
+
+
+class ReponseAcheteurRequest(BaseModel):
+    """Requete pour saisir une reponse acheteur"""
+    # DA source
+    numero_da: str
+
+    # Infos globales
+    devise: str = "MAD"
+    conditions_paiement: Optional[str] = None
+    commentaire_global: Optional[str] = None
+
+    # Lignes avec fournisseur par ligne
+    lignes: List[LigneReponseAcheteur]
+
+
+class ReponseAcheteurResponse(BaseModel):
+    """Reponse apres saisie acheteur"""
+    success: bool
+    message: str
+    numero_rfq: Optional[str] = None
+    uuid_reponse: Optional[str] = None
+    nb_lignes: int = 0
+
+
+# ──────────────────────────────────────────────────────────
+# Lecture des reponses acheteur
+# ──────────────────────────────────────────────────────────
+
+class LigneReponseAcheteurDetail(BaseModel):
+    """Detail d'une ligne de reponse acheteur"""
+    id: int
+    code_article: str
+    designation_article: Optional[str] = None
+    quantite_demandee: Optional[float] = None
+
+    # Fournisseur
+    code_fournisseur: Optional[str] = None
+    nom_fournisseur: str
+    email_fournisseur: str
+
+    # Cotation
+    prix_unitaire_ht: Optional[float] = None
+    quantite_disponible: Optional[float] = None
+    delai_livraison_jours: Optional[int] = None
+    marque_proposee: Optional[str] = None
+    statut_ligne: str
+
+    class Config:
+        from_attributes = True
+
+
+class ReponseAcheteurComplete(BaseModel):
+    """Reponse acheteur complete"""
+    id: int
+    uuid_reponse: str
+    rfq_uuid: str
+    numero_rfq: str
+    numero_da: str
+    devise: str
+    conditions_paiement: Optional[str] = None
+    date_soumission: datetime
+    commentaire_global: Optional[str] = None
+    saisi_par_email: Optional[str] = None
+
+    lignes: List[LigneReponseAcheteurDetail]
+
+    class Config:
+        from_attributes = True
+
+
+class ReponseAcheteurListResponse(BaseModel):
+    """Liste des reponses acheteur"""
+    reponses: List[ReponseAcheteurComplete]
+    total: int
+    page: int
+    limit: int
