@@ -453,7 +453,7 @@ async def list_bons_commande(
         SELECT COUNT(*) as total FROM bons_commande bc WHERE {where_clause}
     """
     total = execute_query(count_query, tuple(params), fetch_one=True)["total"]
-
+    
     # Get BCs
     offset = (page - 1) * limit
     query = f"""
