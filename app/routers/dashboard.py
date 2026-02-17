@@ -114,7 +114,7 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user), db
 
     else:
         # Admin/Responsable - requêtes normales via ORM
-        total_da_actives = db.query(func.count(DemandeAchat.id)).filter(
+        total_da_actives = db.query(func.count(DemandeAchat.numero_da.distinct())).filter(
             DemandeAchat.statut != 'annule'
         ).scalar() or 0
 
