@@ -121,6 +121,7 @@ async def create_fournisseur(
         (data.code_fournisseur,),
         fetch_one=True
     )
+    print(existing)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -132,6 +133,7 @@ async def create_fournisseur(
         (code_fournisseur, nom_fournisseur, email, telephone, fax, adresse, pays, ville)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
+    print(12)
     execute_insert(query, (
         data.code_fournisseur,
         data.nom_fournisseur,
