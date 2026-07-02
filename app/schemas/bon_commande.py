@@ -18,6 +18,7 @@ class StatutBonCommande(str, Enum):
     ENVOYE = "envoye"
     LIVRE = "livre"
     ANNULE = "annule"
+    AUTO_GENERE = "auto_genere"
 
 
 # ──────────────────────────────────────────────────────────

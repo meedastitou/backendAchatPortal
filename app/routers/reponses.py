@@ -401,6 +401,7 @@ async def get_comparaison_dashboard(
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
         LEFT JOIN articles_ref ar ON rd.code_article = ar.code_article
         WHERE rd.prix_unitaire_ht IS NOT NULL
+          AND (lc.actif = TRUE OR lc.actif IS NULL)
           AND NOT EXISTS (
               SELECT 1 FROM selections_articles sa
               WHERE sa.code_article = rd.code_article

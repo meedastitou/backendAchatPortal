@@ -73,6 +73,7 @@ async def get_fournisseurs_disponibles(
         WHERE rd.prix_unitaire_ht IS NOT NULL
           AND f.statut = 'actif'
           AND f.blacklist = 0
+          AND (lc.actif = TRUE OR lc.actif IS NULL)
           AND NOT EXISTS (
               SELECT 1 FROM lignes_bon_commande lbc
               WHERE lbc.ligne_source_id = rd.id
@@ -179,6 +180,7 @@ async def get_lignes_fournisseur(
         JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
         WHERE dc.code_fournisseur = %s
           AND rd.prix_unitaire_ht IS NOT NULL
+          AND (lc.actif = TRUE OR lc.actif IS NULL)
           AND NOT EXISTS (
               SELECT 1 FROM lignes_bon_commande lbc
               WHERE lbc.ligne_source_id = rd.id

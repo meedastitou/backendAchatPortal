@@ -7,7 +7,7 @@ ROUTER - Authentification
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
-from app.auth.jwt import create_token_for_user, get_password_hash, verify_password
+from app.auth.jwt import create_token_for_user, create_service_token, get_password_hash, verify_password
 from app.auth.dependencies import (
     authenticate_user,
     get_current_user,
@@ -550,4 +550,55 @@ async def list_all_familles(admin: dict = Depends(get_admin_user)):
     return {
         "familles": familles,
         "total": len(familles)
+    }
+
+
+# ──────────────────────────────────────────────────────────
+# Admin: Générer un token de service (pour n8n, cron, etc.)
+# ──────────────────────────────────────────────────────────
+
+@router.post("/service-token")
+async def generate_service_token(
+    service_name: str = "n8n",
+    expires_days: int = 365,
+    admin: dict = Depends(get_admin_user)
+):
+    """
+    Générer un token de service longue durée (Admin uniquement)
+
+    Utilisé pour les appels automatisés depuis n8n, cron jobs, etc.
+
+    - **service_name**: Nom du service (ex: "n8n", "scheduler", "rpa")
+    - **expires_days**: Durée de validité en jours (défaut: 365)
+
+    ⚠️ IMPORTANT: Conservez ce token en lieu sûr, il ne sera affiché qu'une seule fois !
+    """
+    if expires_days < 1 or expires_days > 3650:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="expires_days doit être entre 1 et 3650 (10 ans)"
+        )
+
+    token = create_service_token(service_name, expires_days)
+
+    # Log la création du token (sans le token lui-même pour la sécurité)
+    execute_insert(
+        """
+        INSERT INTO logs_service_tokens (service_name, expires_days, created_by, created_at)
+        VALUES (%s, %s, %s, NOW())
+        """,
+        (service_name, expires_days, admin["username"])
+    )
+
+    return {
+        "message": f"Token de service créé pour '{service_name}'",
+        "service_name": service_name,
+        "expires_days": expires_days,
+        "created_by": admin["username"],
+        "token": token,
+        "usage": {
+            "header": "Authorization: Bearer <token>",
+            "example_curl": f'curl -H "Authorization: Bearer {token[:20]}..." http://localhost:8000/api/auto-bc/executer'
+        },
+        "warning": "⚠️ Conservez ce token en lieu sûr ! Il ne sera plus affiché."
     }

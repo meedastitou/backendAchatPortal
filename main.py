@@ -24,7 +24,9 @@ from app.routers import (
     decision_router,
     bon_commande_router,
     selections_router,
-    x3_router
+    x3_router,
+    admin_cotations_router,
+    auto_bc_router
 )
 
 
@@ -77,6 +79,8 @@ app.include_router(decision_router, prefix="/api")
 app.include_router(bon_commande_router, prefix="/api")
 app.include_router(selections_router, prefix="/api")
 app.include_router(x3_router, prefix="/api")
+app.include_router(admin_cotations_router, prefix="/api")
+app.include_router(auto_bc_router, prefix="/api")
 
 
 # ──────────────────────────────────────────────────────────
@@ -123,6 +127,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=settings.DEBUG
     )

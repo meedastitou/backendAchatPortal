@@ -100,3 +100,26 @@ def create_token_for_user(user: dict) -> str:
     }
 
     return create_access_token(token_data)
+
+
+def create_service_token(service_name: str = "n8n", expires_days: int = 365) -> str:
+    """
+    Créer un token de service longue durée pour les appels automatisés (n8n, cron, etc.)
+
+    Args:
+        service_name: Nom du service (ex: "n8n", "scheduler")
+        expires_days: Durée de validité en jours (défaut: 365)
+
+    Returns:
+        Token JWT de service
+    """
+    token_data = {
+        "sub": f"service_{service_name}",
+        "user_id": 0,
+        "role": "service",
+        "service": True,
+        "service_name": service_name
+    }
+
+    expires_delta = timedelta(days=expires_days)
+    return create_access_token(token_data, expires_delta)

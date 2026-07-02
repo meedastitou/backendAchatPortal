@@ -11,3 +11,5 @@ from app.routers.decision import router as decision_router
 from app.routers.bon_commande import router as bon_commande_router
 from app.routers.selections import router as selections_router
 from app.routers.x3 import router as x3_router
+from app.routers.admin_cotations import router as admin_cotations_router
+from app.routers.auto_bc import router as auto_bc_router
