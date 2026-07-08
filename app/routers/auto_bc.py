@@ -16,7 +16,8 @@ import httpx
 
 from app.auth.dependencies import get_current_user
 from app.config import RPA_API_URL
-from app.database import execute_query, execute_insert
+from app.database import execute_query, execute_insert, execute_update
+from app.sqlserver_db import execute_x3_query
 from app.schemas.auto_bc import (
     AutoBCConfig,
     TypeLivraison,
@@ -36,6 +37,302 @@ from app.schemas.auto_bc import (
 
 
 router = APIRouter(prefix="/auto-bc", tags=["Auto BC"])
+
+
+# ──────────────────────────────────────────────────────────
+# Constantes statuts Sage X3
+# ──────────────────────────────────────────────────────────
+
+# Statuts signature ligne (LINAPPFLG_0)
+X3_SIGNE_NON = 1
+X3_SIGNE_PARTIEL = 2
+X3_SIGNE_TOTAL = 3
+X3_SIGNE_NOT_MANAGED = 4
+X3_SIGNE_AUTO = 5
+
+# Statuts solde (LINCLEFLG_0 / CLEFLG_0)
+X3_SOLDE_NON = 1
+X3_SOLDE_OUI = 2
+
+
+# ──────────────────────────────────────────────────────────
+# Vérification statut DA dans Sage X3
+# ──────────────────────────────────────────────────────────
+
+def verifier_statut_da_x3(numero_da: str, code_article: str = None) -> Dict:
+    """
+    Vérifier le statut d'une DA/ligne dans Sage X3.
+
+    Retourne:
+    - statut: 'ok' (peut générer BC), 'solde' (DA soldée), 'non_signe' (pas encore signé)
+    - details: infos brutes de X3
+    """
+    try:
+        # Requête Sage X3
+        query = """
+            SELECT
+                PR.PSHNUM_0 AS numero_da,
+                PRD.ITMREF_0 AS article,
+                PRD.LINAPPFLG_0 AS signee,
+                PRD.LINCLEFLG_0 AS ligne_solde,
+                PR.CLEFLG_0 AS da_solde
+            FROM BASE1.PREQUIS PR
+            INNER JOIN BASE1.PREQUISD PRD ON PR.PSHNUM_0 = PRD.PSHNUM_0
+            WHERE PR.PSHNUM_0 = :numero_da
+        """
+        params = {"numero_da": numero_da}
+
+        # Si code_article spécifié, filtrer sur l'article
+        if code_article:
+            query += " AND PRD.ITMREF_0 = :code_article"
+            params["code_article"] = code_article
+
+        rows = execute_x3_query(query, params)
+
+        if not rows:
+            # DA non trouvée dans X3 - on laisse passer (peut-être nouveau)
+            logging.warning(f"DA {numero_da} non trouvée dans Sage X3")
+            return {"statut": "ok", "details": None, "message": "DA non trouvée dans X3"}
+
+        # Vérifier le statut (prendre la première ligne ou la ligne de l'article)
+        row = rows[0]
+
+        # 1. Vérifier si DA ou ligne soldée
+        if row["da_solde"] == X3_SOLDE_OUI or row["ligne_solde"] == X3_SOLDE_OUI:
+            return {
+                "statut": "solde",
+                "details": row,
+                "message": f"DA {numero_da} soldée dans X3"
+            }
+
+        # 2. Vérifier si ligne non signée
+        if row["signee"] == X3_SIGNE_NON:
+            return {
+                "statut": "non_signe",
+                "details": row,
+                "message": f"DA {numero_da} non signée (attente signature)"
+            }
+
+        # 3. Signé et non soldé = OK pour BC
+        return {
+            "statut": "ok",
+            "details": row,
+            "message": f"DA {numero_da} OK (signée={row['signee']}, soldée={row['da_solde']})"
+        }
+
+    except Exception as e:
+        logging.error(f"Erreur vérification X3 pour DA {numero_da}: {e}")
+        # En cas d'erreur de connexion X3, on laisse passer (fail-open)
+        return {"statut": "ok", "details": None, "message": f"Erreur X3: {str(e)}"}
+
+
+def verifier_das_x3_batch(das_articles: List[tuple]) -> Dict[str, Dict]:
+    """
+    Vérifier plusieurs DA/articles en batch.
+
+    Args:
+        das_articles: Liste de tuples (numero_da, code_article)
+
+    Returns:
+        Dict avec clé "numero_da|code_article" et valeur le résultat de vérification
+    """
+    resultats = {}
+
+    # Grouper par DA pour optimiser les requêtes
+    das_uniques = set(da for da, _ in das_articles)
+
+    for numero_da in das_uniques:
+        try:
+            # Récupérer toutes les lignes de cette DA
+            query = """
+                SELECT
+                    PR.PSHNUM_0 AS numero_da,
+                    PRD.ITMREF_0 AS article,
+                    PRD.LINAPPFLG_0 AS signee,
+                    PRD.LINCLEFLG_0 AS ligne_solde,
+                    PR.CLEFLG_0 AS da_solde
+                FROM BASE1.PREQUIS PR
+                INNER JOIN BASE1.PREQUISD PRD ON PR.PSHNUM_0 = PRD.PSHNUM_0
+                WHERE PR.PSHNUM_0 = :numero_da
+            """
+            rows = execute_x3_query(query, {"numero_da": numero_da})
+
+            if not rows:
+                # DA non trouvée - marquer tous les articles de cette DA comme OK
+                for da, art in das_articles:
+                    if da == numero_da:
+                        resultats[f"{da}|{art}"] = {
+                            "statut": "ok",
+                            "details": None,
+                            "message": "DA non trouvée dans X3"
+                        }
+                continue
+
+            # Créer un dict par article
+            articles_x3 = {row["article"]: row for row in rows}
+
+            # Vérifier chaque article demandé pour cette DA
+            for da, art in das_articles:
+                if da != numero_da:
+                    continue
+
+                key = f"{da}|{art}"
+
+                if art in articles_x3:
+                    row = articles_x3[art]
+
+                    # DA soldée
+                    if row["da_solde"] == X3_SOLDE_OUI or row["ligne_solde"] == X3_SOLDE_OUI:
+                        resultats[key] = {"statut": "solde", "details": row, "message": "Soldée"}
+                    # Non signé
+                    elif row["signee"] == X3_SIGNE_NON:
+                        resultats[key] = {"statut": "non_signe", "details": row, "message": "Non signé"}
+                    # OK
+                    else:
+                        resultats[key] = {"statut": "ok", "details": row, "message": "OK"}
+                else:
+                    # Article non trouvé dans cette DA
+                    resultats[key] = {"statut": "ok", "details": None, "message": "Article non trouvé"}
+
+        except Exception as e:
+            logging.error(f"Erreur batch X3 pour DA {numero_da}: {e}")
+            # Marquer tous les articles de cette DA comme OK (fail-open)
+            for da, art in das_articles:
+                if da == numero_da:
+                    resultats[f"{da}|{art}"] = {
+                        "statut": "ok",
+                        "details": None,
+                        "message": f"Erreur X3: {str(e)}"
+                    }
+
+    return resultats
+
+
+def marquer_lignes_soldees_mysql(lignes_cotation_ids: List[int], motif: str = "solde"):
+    """Marquer des lignes de cotation comme soldées dans MySQL"""
+    if not lignes_cotation_ids:
+        return
+
+    placeholders = ",".join(["%s"] * len(lignes_cotation_ids))
+    execute_update(
+        f"""
+        UPDATE lignes_cotation
+        SET x3_solde = TRUE,
+            x3_date_verification = NOW(),
+            x3_motif_exclusion = %s
+        WHERE id IN ({placeholders})
+        """,
+        (motif,) + tuple(lignes_cotation_ids)
+    )
+    logging.info(f"Marqué {len(lignes_cotation_ids)} lignes comme soldées (motif: {motif})")
+
+
+def log_verification_x3(numero_da: str, code_article: str, details: Dict, action: str):
+    """Logger une vérification X3 pour traçabilité"""
+    try:
+        execute_insert(
+            """
+            INSERT INTO logs_verification_x3 (
+                numero_da, code_article,
+                x3_linappflg, x3_lincleflg, x3_cleflg,
+                action_prise
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                numero_da,
+                code_article,
+                details.get("signee") if details else None,
+                details.get("ligne_solde") if details else None,
+                details.get("da_solde") if details else None,
+                action
+            )
+        )
+    except Exception as e:
+        logging.warning(f"Erreur log vérification X3: {e}")
+
+
+def get_tarifs_articles_x3(codes_articles: List[str]) -> Dict[str, float]:
+    """
+    Récupérer les tarifs des articles depuis Sage X3.
+
+    Returns:
+        Dict avec code_article comme clé et tarif (PRI_0) comme valeur
+    """
+    if not codes_articles:
+        return {}
+
+    tarifs = {}
+
+    try:
+        # Requête pour récupérer les tarifs
+        # On utilise IN pour récupérer plusieurs articles en une requête
+        placeholders = ", ".join([f":art_{i}" for i in range(len(codes_articles))])
+        params = {f"art_{i}": code for i, code in enumerate(codes_articles)}
+
+        query = f"""
+            SELECT
+                ITMMASTER.ITMREF_0 AS code_article,
+                PPRICLIST.PRI_0 AS tarif
+            FROM BASE1.PPRICLIST PPRICLIST
+            INNER JOIN BASE1.ITMMASTER ITMMASTER
+                ON PPRICLIST.PLICRI1_0 = ITMMASTER.ITMREF_0
+            WHERE ITMMASTER.ITMREF_0 IN ({placeholders})
+        """
+
+        rows = execute_x3_query(query, params)
+
+        if rows:
+            for row in rows:
+                tarifs[row["code_article"]] = float(row["tarif"]) if row["tarif"] else 0.0
+
+        logging.info(f"Récupéré {len(tarifs)} tarifs depuis X3")
+
+    except Exception as e:
+        logging.error(f"Erreur récupération tarifs X3: {e}")
+
+    return tarifs
+
+
+def verifier_prix_vs_tarif_x3(offres: List[dict]) -> tuple[List[dict], List[str]]:
+    """
+    Vérifier que le prix fournisseur est <= tarif X3 pour chaque article.
+
+    Returns:
+        (offres_valides, articles_prix_superieur)
+    """
+    if not offres:
+        return [], []
+
+    # Extraire les codes articles uniques
+    codes_articles = list(set(row["code_article"] for row in offres))
+
+    # Récupérer les tarifs X3
+    tarifs_x3 = get_tarifs_articles_x3(codes_articles)
+
+    offres_valides = []
+    articles_prix_superieur = []
+
+    for row in offres:
+        code_article = row["code_article"]
+        prix_fournisseur = float(row["prix_unitaire_ht"])
+
+        # Récupérer le tarif X3 (0 si non trouvé = pas de limite)
+        tarif_x3 = tarifs_x3.get(code_article, 0.0)
+
+        if tarif_x3 > 0 and prix_fournisseur > tarif_x3:
+            # Prix fournisseur supérieur au tarif X3 → exclure
+            articles_prix_superieur.append(
+                f"{row['numero_da']}/{code_article} (prix={prix_fournisseur:.2f} > tarif={tarif_x3:.2f})"
+            )
+            logging.debug(f"Article {code_article} exclu: prix {prix_fournisseur} > tarif X3 {tarif_x3}")
+        else:
+            # Prix OK ou pas de tarif X3 → garder
+            offres_valides.append(row)
+
+    if articles_prix_superieur:
+        logging.info(f"Exclu {len(articles_prix_superieur)} articles avec prix > tarif X3")
+
+    return offres_valides, articles_prix_superieur
 
 
 # ──────────────────────────────────────────────────────────
@@ -96,7 +393,7 @@ async def envoyer_rpa_fournisseur(
             "Acheteur": acheteur,
             "Code_Fournisseur": code_fournisseur,
             "Email_Fournisseur": email_fournisseur or "",
-            "TEL_Fournisseu": tel_fournisseur or "",
+            "TEL_Fournisseur": tel_fournisseur or "",
             "Code_Article": offre.code_article,
             "Montant": float(offre.prix_unitaire_ht),
             "Marque": offre.marque_proposee or "",
@@ -108,7 +405,7 @@ async def envoyer_rpa_fournisseur(
         "email_expediteur": email_acheteur,
         "headless": True
     }
-
+    print(rpa_payload)
     logging.info(f"Envoi RPA pour fournisseur {code_fournisseur} (BC: {numero_bc}): {len(donnees_rpa)} ligne(s)")
 
     try:
@@ -204,15 +501,17 @@ def get_offres_eligibles(config: AutoBCConfig) -> List[dict]:
             AND f.blacklist = 0
 
         WHERE
-            
+            -- Exclure les lignes déjà marquées comme soldées dans X3
+            (lc.x3_solde = FALSE OR lc.x3_solde IS NULL)
 
             -- Pas déjà commandé
-            NOT EXISTS (
+            AND NOT EXISTS (
                 SELECT 1 FROM lignes_bon_commande lbc
                 WHERE lbc.ligne_source_id = rd.id
             )
-            and rd.prix_unitaire_ht > 0
-            and rd.quantite_disponible > 0
+            AND rd.prix_unitaire_ht > 0
+            AND rd.quantite_disponible > 0
+            AND rd.marque_proposee is not NULL
         ORDER BY
             ar.code_article,
             lc.numero_da
@@ -283,7 +582,7 @@ def grouper_offres_par_article(offres_raw: List[dict], config: AutoBCConfig) -> 
             prix_unitaire_ht=float(row["prix_unitaire_ht"]),
             quantite_disponible=quantite_disponible,
             marque_proposee=row["marque_proposee"],
-            delai_livraison=row["delai_livraison"],
+            # delai_livraison=row["delai_livraison"],
             date_reponse=row["date_reponse"],
             type_livraison=type_livraison,
             score=score,
@@ -349,6 +648,76 @@ async def preview_auto_bc(
 
     # Récupérer les offres éligibles
     offres_raw = get_offres_eligibles(config)
+
+    if not offres_raw:
+        return AutoBCPreviewResponse(
+            config=config,
+            date_preview=datetime.now(),
+            nb_articles_eligibles=0,
+            nb_articles_avec_offre_complete=0,
+            nb_articles_avec_offre_partielle=0,
+            nb_articles_sans_offre=0,
+            bcs_preview=[],
+            nb_bc_a_creer=0,
+            articles_sans_offre=[],
+            economie_totale_estimee=0.0
+        )
+
+    # ══════════════════════════════════════════════════════════
+    # VÉRIFICATION STATUT DA DANS SAGE X3 (aussi en preview)
+    # ══════════════════════════════════════════════════════════
+    logging.info("[Preview] Vérification des statuts DA dans Sage X3...")
+
+    # Extraire les paires (numero_da, code_article) uniques
+    das_articles = list(set(
+        (row["numero_da"], row["code_article"])
+        for row in offres_raw
+    ))
+
+    # Vérifier en batch dans X3
+    statuts_x3 = verifier_das_x3_batch(das_articles)
+    print(f"Statuts X3: {statuts_x3}")
+    # Filtrer les offres selon le statut X3
+    offres_filtrees = []
+    lignes_a_marquer_solde = []
+
+    for row in offres_raw:
+        key = f"{row['numero_da']}|{row['code_article']}"
+        statut_x3 = statuts_x3.get(key, {"statut": "ok"})
+
+        if statut_x3["statut"] == "solde":
+            # DA soldée → marquer dans MySQL et exclure
+            lignes_a_marquer_solde.append(row["ligne_cotation_id"])
+            log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "solde")
+
+        elif statut_x3["statut"] == "non_signe":
+            # Non signé → exclure sans marquer
+            log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "ignore_non_signe")
+
+        else:
+            # OK → garder l'offre
+            offres_filtrees.append(row)
+
+    # Marquer les lignes soldées dans MySQL
+    if lignes_a_marquer_solde:
+        marquer_lignes_soldees_mysql(lignes_a_marquer_solde, "solde")
+        logging.info(f"[Preview] Marqué {len(lignes_a_marquer_solde)} lignes comme soldées")
+
+    # Remplacer offres_raw par les offres filtrées
+    offres_raw = offres_filtrees
+    logging.info(f"[Preview] Après filtrage statut X3: {len(offres_raw)} offres restantes")
+
+    # ══════════════════════════════════════════════════════════
+    # VÉRIFICATION PRIX VS TARIF X3
+    # ══════════════════════════════════════════════════════════
+    if offres_raw:
+        logging.info("[Preview] Vérification prix vs tarif X3...")
+        offres_raw, articles_prix_sup = verifier_prix_vs_tarif_x3(offres_raw)
+        if articles_prix_sup:
+            logging.info(f"[Preview] Exclu {len(articles_prix_sup)} articles (prix > tarif X3)")
+        logging.info(f"[Preview] Après filtrage prix: {len(offres_raw)} offres restantes")
+
+    # ══════════════════════════════════════════════════════════
 
     if not offres_raw:
         return AutoBCPreviewResponse(
@@ -469,7 +838,102 @@ async def executer_auto_bc(
     try:
         # Récupérer les offres éligibles
         offres_raw = get_offres_eligibles(config)
-        print(offres_raw)
+        print(f"Offres brutes récupérées: {len(offres_raw) if offres_raw else 0}")
+
+        if not offres_raw:
+            # Pas d'offres éligibles
+            duree_ms = int((time.time() - start_time) * 1000)
+            log_id = execute_insert("""
+                INSERT INTO logs_auto_bc (
+                    date_execution, code_famille, periode_heures,
+                    nb_articles_eligibles, nb_articles_traites, nb_bc_crees,
+                    statut, execute_par, duree_execution_ms
+                ) VALUES (NOW(), %s, %s, 0, 0, 0, 'succes', %s, %s)
+            """, (config.code_famille, config.periode_heures, execute_par, duree_ms))
+
+            return AutoBCExecuteResponse(
+                success=True,
+                statut=StatutExecution.SUCCES,
+                message="Aucune offre éligible trouvée",
+                date_execution=datetime.now(),
+                duree_execution_ms=duree_ms,
+                config=config,
+                execute_par=execute_par,
+                nb_articles_eligibles=0,
+                nb_articles_traites=0,
+                nb_bc_crees=0,
+                bcs_crees=[],
+                economie_totale=0.0,
+                log_id=log_id
+            )
+
+        # ══════════════════════════════════════════════════════════
+        # VÉRIFICATION STATUT DA DANS SAGE X3
+        # ══════════════════════════════════════════════════════════
+        logging.info("Vérification des statuts DA dans Sage X3...")
+
+        # Extraire les paires (numero_da, code_article) uniques
+        das_articles = list(set(
+            (row["numero_da"], row["code_article"])
+            for row in offres_raw
+        ))
+
+        # Vérifier en batch dans X3
+        statuts_x3 = verifier_das_x3_batch(das_articles)
+
+        # Filtrer les offres selon le statut X3
+        offres_filtrees = []
+        lignes_a_marquer_solde = []
+        articles_non_signes = []
+        articles_soldes = []
+
+        for row in offres_raw:
+            key = f"{row['numero_da']}|{row['code_article']}"
+            statut_x3 = statuts_x3.get(key, {"statut": "ok"})
+
+            if statut_x3["statut"] == "solde":
+                # DA soldée → marquer dans MySQL et exclure
+                lignes_a_marquer_solde.append(row["ligne_cotation_id"])
+                articles_soldes.append(f"{row['numero_da']}/{row['code_article']}")
+                log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "solde")
+
+            elif statut_x3["statut"] == "non_signe":
+                # Non signé → exclure sans marquer (peut-être signé demain)
+                articles_non_signes.append(f"{row['numero_da']}/{row['code_article']}")
+                log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "ignore_non_signe")
+
+            else:
+                # OK → garder l'offre
+                offres_filtrees.append(row)
+                log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "ok")
+
+        # Marquer les lignes soldées dans MySQL (pour ne plus les récupérer)
+        if lignes_a_marquer_solde:
+            marquer_lignes_soldees_mysql(lignes_a_marquer_solde, "solde")
+            logging.info(f"Marqué {len(lignes_a_marquer_solde)} lignes comme soldées")
+
+        if articles_non_signes:
+            logging.info(f"Ignoré {len(articles_non_signes)} articles non signés: {articles_non_signes[:5]}...")
+
+        if articles_soldes:
+            logging.info(f"Exclu {len(articles_soldes)} articles soldés: {articles_soldes[:5]}...")
+
+        # Remplacer offres_raw par les offres filtrées
+        offres_raw = offres_filtrees
+        logging.info(f"Après filtrage statut X3: {len(offres_raw)} offres restantes")
+
+        # ══════════════════════════════════════════════════════════
+        # VÉRIFICATION PRIX VS TARIF X3
+        # ══════════════════════════════════════════════════════════
+        if offres_raw:
+            logging.info("Vérification prix vs tarif X3...")
+            offres_raw, articles_prix_sup = verifier_prix_vs_tarif_x3(offres_raw)
+            if articles_prix_sup:
+                logging.info(f"Exclu {len(articles_prix_sup)} articles (prix > tarif X3): {articles_prix_sup[:5]}...")
+            logging.info(f"Après filtrage prix: {len(offres_raw)} offres restantes")
+
+        # ══════════════════════════════════════════════════════════
+
         if not offres_raw:
             # Pas d'offres éligibles
             duree_ms = int((time.time() - start_time) * 1000)

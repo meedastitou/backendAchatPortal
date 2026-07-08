@@ -69,7 +69,7 @@ async def get_fournisseurs_disponibles(
         JOIN reponses_fournisseurs_entete re ON dc.uuid = re.rfq_uuid
         JOIN reponses_fournisseurs_detail rd ON re.id = rd.reponse_entete_id
         JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
-        JOIN demandes_achat da ON dc.numero_da = da.numero_da
+        JOIN demandes_achat da ON lc.numero_da = da.numero_da
         WHERE rd.prix_unitaire_ht IS NOT NULL
           AND f.statut = 'actif'
           AND f.blacklist = 0
@@ -171,13 +171,13 @@ async def get_lignes_fournisseur(
             lc.unite,
             rd.prix_unitaire_ht,
             rd.date_livraison,
-            rd.delai_livraison as delai_livraison_jours,
+            DATEDIFF(rd.date_livraison, NOW()) as delai_livraison_jours,
             rd.marque_proposee
         FROM reponses_fournisseurs_detail rd
         JOIN reponses_fournisseurs_entete re ON rd.reponse_entete_id = re.id
         JOIN demandes_cotation dc ON re.rfq_uuid = dc.uuid
-        JOIN demandes_achat da ON dc.numero_da = da.numero_da
         JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
+        JOIN demandes_achat da ON lc.numero_da = da.numero_da
         WHERE dc.code_fournisseur = %s
           AND rd.prix_unitaire_ht IS NOT NULL
           AND (lc.actif = TRUE OR lc.actif IS NULL)
@@ -323,11 +323,9 @@ async def generer_bon_commande(
     for ligne in request.lignes:
         ligne_info = execute_query(
             """
-            SELECT da.numero_da
+            SELECT lc.numero_da
             FROM reponses_fournisseurs_detail rd
-            JOIN reponses_fournisseurs_entete re ON rd.reponse_entete_id = re.id
-            JOIN demandes_cotation dc ON re.rfq_uuid = dc.uuid
-            JOIN demandes_achat da ON dc.numero_da = da.numero_da
+            JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
             WHERE rd.id = %s
             """,
             (ligne.ligne_id,),
@@ -369,13 +367,12 @@ async def generer_bon_commande(
             """
             SELECT
                 rd.id,
-                da.numero_da,
+                lc.numero_da,
                 dc.numero_rfq,
                 lc.unite
             FROM reponses_fournisseurs_detail rd
             JOIN reponses_fournisseurs_entete re ON rd.reponse_entete_id = re.id
             JOIN demandes_cotation dc ON re.rfq_uuid = dc.uuid
-            JOIN demandes_achat da ON dc.numero_da = da.numero_da
             JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
             WHERE rd.id = %s
             """,
@@ -673,12 +670,13 @@ async def convert_offre_to_rpa(
             re.reference_fournisseur,
             dc.numero_rfq,
             dc.code_fournisseur,
-            da.numero_da,
+            (SELECT lc.numero_da FROM reponses_fournisseurs_detail rd
+             JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
+             WHERE rd.reponse_entete_id = re.id LIMIT 1) as numero_da,
             f.nom_fournisseur,
             f.email as email_fournisseur
         FROM reponses_fournisseurs_entete re
         JOIN demandes_cotation dc ON re.rfq_uuid = dc.uuid
-        JOIN demandes_achat da ON dc.numero_da = da.numero_da
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
         WHERE re.id = %s
     """

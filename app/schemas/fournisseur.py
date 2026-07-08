@@ -23,7 +23,7 @@ class StatutFournisseur(str, Enum):
 class FournisseurBase(BaseModel):
     code_fournisseur: str
     nom_fournisseur: str
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     telephone: Optional[str] = None
     fax: Optional[str] = None
     adresse: Optional[str] = None
@@ -37,7 +37,7 @@ class FournisseurCreate(FournisseurBase):
 
 class FournisseurUpdate(BaseModel):
     nom_fournisseur: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     telephone: Optional[str] = None
     fax: Optional[str] = None
     adresse: Optional[str] = None

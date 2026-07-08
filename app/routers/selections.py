@@ -62,7 +62,7 @@ async def selection_automatique(
             rd.marque_proposee,
             rd.marque_conforme,
             rd.date_livraison,
-            rd.delai_livraison
+            DATEDIFF(rd.date_livraison, NOW()) as delai_livraison
         FROM reponses_fournisseurs_detail rd
         JOIN reponses_fournisseurs_entete re ON rd.reponse_entete_id = re.id
         JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
