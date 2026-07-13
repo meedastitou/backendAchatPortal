@@ -152,6 +152,9 @@ class AutoBCPreviewResponse(BaseModel):
     # Économie totale estimée
     economie_totale_estimee: float
 
+    # Analyse détaillée (optionnel)
+    analyse: Optional["AnalyseAutoBC"] = None
+
 
 # ──────────────────────────────────────────────────────────
 # Exécution Auto BC
@@ -205,6 +208,9 @@ class AutoBCExecuteResponse(BaseModel):
     # ID du log pour référence
     log_id: Optional[int] = None
 
+    # Analyse détaillée (optionnel)
+    analyse: Optional["AnalyseAutoBC"] = None
+
 
 # ──────────────────────────────────────────────────────────
 # Historique
@@ -256,3 +262,153 @@ class LogAutoBCListResponse(BaseModel):
     total: int
     page: int
     limit: int
+
+
+# ──────────────────────────────────────────────────────────
+# Analyse Auto BC
+# ──────────────────────────────────────────────────────────
+
+class AnalyseReponseConsultee(BaseModel):
+    """Réponse consultée pendant l'analyse"""
+    detail_id: int  # ID pour permettre la modification
+    numero_da: str
+    code_article: str
+    designation_article: Optional[str] = None
+    code_fournisseur: str
+    nom_fournisseur: Optional[str] = None
+    prix_unitaire_ht: float
+    quantite_disponible: float
+    marque_proposee: Optional[str] = None
+    date_reponse: datetime
+    incluse: bool  # Si incluse dans la sélection finale
+    raison_exclusion: Optional[str] = None  # Raison si exclue
+
+
+class AnalyseStatutDA(BaseModel):
+    """Statut d'une DA vérifié dans X3"""
+    numero_da: str
+    code_article: str
+    statut_x3: str  # 'ok', 'solde', 'non_signe'
+    x3_signee: Optional[int] = None  # LINAPPFLG_0
+    x3_ligne_solde: Optional[int] = None  # LINCLEFLG_0
+    x3_da_solde: Optional[int] = None  # CLEFLG_0
+    message: str
+
+
+class AnalysePrixSuperieur(BaseModel):
+    """Offre avec prix supérieur au tarif X3"""
+    numero_da: str
+    code_article: str
+    designation_article: Optional[str] = None
+    code_fournisseur: str
+    nom_fournisseur: Optional[str] = None
+    prix_propose: float
+    tarif_x3: float
+    ecart_montant: float
+    ecart_pourcent: float
+
+
+class AnalyseMarqueProbleme(BaseModel):
+    """Offre avec problème de marque"""
+    numero_da: str
+    code_article: str
+    designation_article: Optional[str] = None
+    code_fournisseur: str
+    nom_fournisseur: Optional[str] = None
+    marque_souhaitee: Optional[str] = None
+    marque_proposee: Optional[str] = None
+    type_probleme: str  # 'manquante', 'differente', 'non_validee'
+    valide_xmarqa: bool = False  # Existe dans XMARQA
+    valide_historique: bool = False  # Existe dans historique achats
+    marque_finale: Optional[str] = None  # Marque à utiliser (peut être depuis XMARQA)
+    message: Optional[str] = None  # Message explicatif
+
+
+class AnalyseAutoBC(BaseModel):
+    """Analyse complète de l'exécution Auto BC"""
+
+    # 1. Réponses consultées
+    nb_reponses_consultees: int = 0
+    reponses_consultees: List[AnalyseReponseConsultee] = []
+
+    # 2. Statuts DA (X3)
+    nb_da_ok: int = 0
+    nb_da_soldees: int = 0
+    nb_da_soldees_distinct: int = 0  # Nombre de DA distinctes soldées
+    nb_da_non_signees: int = 0
+    nb_da_non_signees_distinct: int = 0  # Nombre de DA distinctes non signées
+    statuts_da: List[AnalyseStatutDA] = []
+
+    # 3. Prix supérieur au tarif X3
+    nb_prix_superieur: int = 0
+    montant_ecart_total: float = 0.0
+    offres_prix_superieur: List[AnalysePrixSuperieur] = []
+
+    # 4. Problèmes de marque
+    nb_marque_manquante: int = 0
+    nb_marque_differente: int = 0
+    nb_marque_non_validee: int = 0  # Marque n'existe ni dans XMARQA ni historique
+    nb_marque_depuis_xmarqa: int = 0  # Marque récupérée depuis XMARQA (était null)
+    offres_marque_probleme: List[AnalyseMarqueProbleme] = []
+
+    # Résumé
+    resume: str = ""
+
+
+# ──────────────────────────────────────────────────────────
+# BC créés dans Sage X3 via RPA
+# ──────────────────────────────────────────────────────────
+
+class LigneBCX3(BaseModel):
+    """Ligne de BC dans Sage X3"""
+    numero_commande: str
+    code_fournisseur: str
+    nom_fournisseur: Optional[str] = None
+    numero_da: Optional[str] = None
+    code_article: Optional[str] = None
+    designation_article: Optional[str] = None
+    montant_ligne_ht: Optional[float] = None
+    montant_ligne_ttc: Optional[float] = None
+
+
+class BCX3Response(BaseModel):
+    """BC créé dans Sage X3 via RPA"""
+    numero_commande: str
+    code_fournisseur: str
+    nom_fournisseur: Optional[str] = None
+    total_lignes_ttc: Optional[float] = None
+    total_commande_ht: Optional[float] = None
+    utilisateur_modif: Optional[str] = None
+    lignes: List[LigneBCX3] = []
+    nb_lignes: int = 0
+
+
+class BCX3ListResponse(BaseModel):
+    """Liste des BC Sage X3"""
+    bcs: List[BCX3Response]
+    total: int
+
+
+# ──────────────────────────────────────────────────────────
+# Modification de marque
+# ──────────────────────────────────────────────────────────
+
+class UpdateMarqueRequest(BaseModel):
+    """Requête pour modifier la marque d'une réponse fournisseur"""
+    marque: str = Field(..., description="Nouvelle marque")
+
+
+class UpdateMarqueResponse(BaseModel):
+    """Réponse après modification de marque"""
+    success: bool
+    message: str
+    detail_id: int
+    ancienne_marque: Optional[str] = None
+    nouvelle_marque: str
+
+
+# ──────────────────────────────────────────────────────────
+# Rebuild models with forward references
+# ──────────────────────────────────────────────────────────
+AutoBCPreviewResponse.model_rebuild()
+AutoBCExecuteResponse.model_rebuild()

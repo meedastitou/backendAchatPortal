@@ -32,7 +32,17 @@ from app.schemas.auto_bc import (
     AutoBCExecuteResponse,
     LogAutoBCDetail,
     LogAutoBC,
-    LogAutoBCListResponse
+    LogAutoBCListResponse,
+    # Analyse
+    AnalyseAutoBC,
+    AnalyseReponseConsultee,
+    AnalyseStatutDA,
+    AnalysePrixSuperieur,
+    AnalyseMarqueProbleme,
+    # BC X3
+    LigneBCX3,
+    BCX3Response,
+    BCX3ListResponse
 )
 
 
@@ -336,6 +346,278 @@ def verifier_prix_vs_tarif_x3(offres: List[dict]) -> tuple[List[dict], List[str]
 
 
 # ──────────────────────────────────────────────────────────
+# Validation des marques dans Sage X3
+# ──────────────────────────────────────────────────────────
+
+def normaliser_marque(marque: str) -> str:
+    """
+    Normaliser une marque pour comparaison:
+    - Supprimer tous les espaces
+    - Convertir en minuscules
+    """
+    if not marque:
+        return ""
+    return marque.replace(" ", "").lower().strip()
+
+
+def verifier_marque_xmarqa(code_article: str, marque: str) -> bool:
+    """
+    Vérifier si une marque existe dans la table XMARQA de Sage X3.
+    Table: BASE1.XMARQA (Marques autorisées par article)
+
+    Comparaison normalisée: sans espaces et en minuscules.
+
+    Returns:
+        True si la marque existe pour cet article
+    """
+    if not marque or not code_article:
+        return False
+
+    marque_normalisee = normaliser_marque(marque)
+
+    try:
+        # Récupérer toutes les marques de l'article
+        query = """
+            SELECT XMARQ_0 AS marque_article
+            FROM BASE1.XMARQA
+            WHERE ITMREF_0 = :code_article
+              AND XMARQ_0 IS NOT NULL
+        """
+        rows = execute_x3_query(query, {"code_article": code_article})
+
+        if not rows:
+            return False
+
+        # Comparer avec normalisation
+        for row in rows:
+            marque_x3 = normaliser_marque(row.get("marque_article", ""))
+            if marque_x3 == marque_normalisee:
+                return True
+
+        return False
+    except Exception as e:
+        logging.error(f"Erreur vérification marque XMARQA pour {code_article}/{marque}: {e}")
+        return False
+
+
+def verifier_marque_historique(code_article: str, marque: str) -> bool:
+    """
+    Vérifier si une marque a été utilisée dans l'historique des achats (PORDERQ).
+    Table: BASE1.PORDERQ (Lignes de commandes d'achat)
+
+    Comparaison normalisée: sans espaces et en minuscules.
+
+    Returns:
+        True si la marque a déjà été achetée pour cet article
+    """
+    if not marque or not code_article:
+        return False
+
+    marque_normalisee = normaliser_marque(marque)
+
+    try:
+        # Récupérer toutes les marques de l'historique pour cet article
+        query = """
+            SELECT DISTINCT XMARQ_0 AS marque_article
+            FROM BASE1.PORDERQ
+            WHERE ITMREF_0 = :code_article
+              AND XMARQ_0 IS NOT NULL
+        """
+        rows = execute_x3_query(query, {"code_article": code_article})
+
+        if not rows:
+            return False
+
+        # Comparer avec normalisation
+        for row in rows:
+            marque_hist = normaliser_marque(row.get("marque_article", ""))
+            if marque_hist == marque_normalisee:
+                return True
+
+        return False
+    except Exception as e:
+        logging.error(f"Erreur vérification marque historique pour {code_article}/{marque}: {e}")
+        return False
+
+
+def get_marque_defaut_x3(code_article: str) -> Optional[str]:
+    """
+    Récupérer une marque par défaut depuis XMARQA pour un article.
+    Utilisé quand la marque proposée est null/vide.
+
+    Returns:
+        La première marque trouvée ou None
+    """
+    if not code_article:
+        return None
+
+    try:
+        query = """
+            SELECT TOP 1 XMARQ_0 AS marque_article
+            FROM BASE1.XMARQA
+            WHERE ITMREF_0 = :code_article
+              AND XMARQ_0 IS NOT NULL
+              AND XMARQ_0 != ''
+        """
+        rows = execute_x3_query(query, {"code_article": code_article})
+        if rows and rows[0].get("marque_article"):
+            return rows[0]["marque_article"]
+        return None
+    except Exception as e:
+        logging.error(f"Erreur récupération marque défaut pour {code_article}: {e}")
+        return None
+
+
+def get_marques_defaut_batch(codes_articles: List[str]) -> Dict[str, str]:
+    """
+    Récupérer les marques par défaut pour plusieurs articles en batch.
+
+    Returns:
+        Dict avec code_article comme clé et marque comme valeur
+    """
+    if not codes_articles:
+        return {}
+
+    marques = {}
+
+    try:
+        # Construire la requête avec IN
+        placeholders = ", ".join([f":art_{i}" for i in range(len(codes_articles))])
+        params = {f"art_{i}": code for i, code in enumerate(codes_articles)}
+
+        query = f"""
+            SELECT ITMREF_0 AS code_article, XMARQ_0 AS marque_article
+            FROM BASE1.XMARQA
+            WHERE ITMREF_0 IN ({placeholders})
+              AND XMARQ_0 IS NOT NULL
+              AND XMARQ_0 != ''
+        """
+
+        rows = execute_x3_query(query, params)
+
+        if rows:
+            for row in rows:
+                code = row["code_article"]
+                # Prendre la première marque trouvée pour chaque article
+                if code not in marques:
+                    marques[code] = row["marque_article"]
+
+        logging.info(f"Récupéré {len(marques)} marques par défaut depuis X3")
+
+    except Exception as e:
+        logging.error(f"Erreur récupération marques défaut batch: {e}")
+
+    return marques
+
+
+def verifier_marques_batch(offres: List[dict]) -> Dict[str, Dict]:
+    """
+    Vérifier les marques pour plusieurs offres en batch.
+
+    Règles:
+    1. Si marque_proposee est null/vide → récupérer marque depuis XMARQA
+    2. Sinon, vérifier que la marque existe dans XMARQA
+    3. Sinon, vérifier dans l'historique PORDERQ
+    4. Si n'existe nulle part → exclure
+
+    Returns:
+        Dict avec clé "detail_id" et valeur:
+        {
+            "valide": bool,
+            "marque_finale": str (marque à utiliser),
+            "source": "proposee" | "xmarqa" | "historique" | None,
+            "message": str
+        }
+    """
+    resultats = {}
+
+    if not offres:
+        return resultats
+
+    # Séparer les offres avec et sans marque proposée
+    offres_sans_marque = []
+    offres_avec_marque = []
+
+    for offre in offres:
+        detail_id = offre.get("detail_id") or offre.get("id")
+        marque_proposee = offre.get("marque_proposee")
+        code_article = offre.get("code_article")
+
+        if not marque_proposee or marque_proposee.strip() == "":
+            offres_sans_marque.append(offre)
+        else:
+            offres_avec_marque.append(offre)
+
+    # 1. Traiter les offres SANS marque proposée → récupérer marque par défaut
+    if offres_sans_marque:
+        codes_uniques = list(set(o["code_article"] for o in offres_sans_marque))
+        marques_defaut = get_marques_defaut_batch(codes_uniques)
+
+        for offre in offres_sans_marque:
+            detail_id = offre.get("detail_id") or offre.get("id")
+            code_article = offre["code_article"]
+
+            marque_defaut = marques_defaut.get(code_article)
+
+            if marque_defaut:
+                resultats[detail_id] = {
+                    "valide": True,
+                    "marque_finale": marque_defaut,
+                    "source": "xmarqa",
+                    "message": f"Marque par défaut depuis XMARQA: {marque_defaut}"
+                }
+            else:
+                resultats[detail_id] = {
+                    "valide": False,
+                    "marque_finale": None,
+                    "source": None,
+                    "message": "Aucune marque proposée et aucune marque par défaut trouvée dans X3"
+                }
+
+    # 2. Traiter les offres AVEC marque proposée
+    if offres_avec_marque:
+        # Vérifier d'abord dans XMARQA (batch)
+        marques_a_verifier = {}
+        for offre in offres_avec_marque:
+            detail_id = offre.get("detail_id") or offre.get("id")
+            code_article = offre["code_article"]
+            marque = offre["marque_proposee"]
+            marques_a_verifier[detail_id] = {"code_article": code_article, "marque": marque}
+
+        # Vérifier chaque marque (pour l'instant, on fait une boucle - on peut optimiser plus tard)
+        for detail_id, info in marques_a_verifier.items():
+            code_article = info["code_article"]
+            marque = info["marque"]
+
+            # Vérifier dans XMARQA
+            if verifier_marque_xmarqa(code_article, marque):
+                resultats[detail_id] = {
+                    "valide": True,
+                    "marque_finale": marque,
+                    "source": "xmarqa",
+                    "message": f"Marque validée dans XMARQA"
+                }
+            # Sinon, vérifier dans l'historique
+            elif verifier_marque_historique(code_article, marque):
+                resultats[detail_id] = {
+                    "valide": True,
+                    "marque_finale": marque,
+                    "source": "historique",
+                    "message": f"Marque trouvée dans historique achats"
+                }
+            else:
+                # Marque n'existe nulle part → exclure
+                resultats[detail_id] = {
+                    "valide": False,
+                    "marque_finale": marque,
+                    "source": None,
+                    "message": f"Marque '{marque}' non trouvée dans XMARQA ni historique"
+                }
+
+    return resultats
+
+
+# ──────────────────────────────────────────────────────────
 # Fonctions utilitaires
 # ──────────────────────────────────────────────────────────
 
@@ -511,14 +793,13 @@ def get_offres_eligibles(config: AutoBCConfig) -> List[dict]:
             )
             AND rd.prix_unitaire_ht > 0
             AND rd.quantite_disponible > 0
-            AND rd.marque_proposee is not NULL
+            -- AND rd.marque_proposee is not NULL
         ORDER BY
             ar.code_article,
             lc.numero_da
     """
 
     results = execute_query(query)
-    print(results)
     return results or []
 
 
@@ -638,6 +919,7 @@ async def preview_auto_bc(
     """
     Prévisualisation des BC qui seraient créés (sans les créer réellement).
     Permet de vérifier avant l'exécution automatique.
+    Inclut une analyse détaillée pour comprendre les exclusions.
     """
 
     config = AutoBCConfig(
@@ -646,10 +928,16 @@ async def preview_auto_bc(
         dry_run=True
     )
 
+    # ══════════════════════════════════════════════════════════
+    # INITIALISER L'ANALYSE
+    # ══════════════════════════════════════════════════════════
+    analyse = AnalyseAutoBC()
+
     # Récupérer les offres éligibles
     offres_raw = get_offres_eligibles(config)
 
     if not offres_raw:
+        analyse.resume = "Aucune réponse fournisseur trouvée pour les critères de recherche."
         return AutoBCPreviewResponse(
             config=config,
             date_preview=datetime.now(),
@@ -660,11 +948,32 @@ async def preview_auto_bc(
             bcs_preview=[],
             nb_bc_a_creer=0,
             articles_sans_offre=[],
-            economie_totale_estimee=0.0
+            economie_totale_estimee=0.0,
+            analyse=analyse
         )
 
     # ══════════════════════════════════════════════════════════
-    # VÉRIFICATION STATUT DA DANS SAGE X3 (aussi en preview)
+    # 1. COLLECTER TOUTES LES RÉPONSES CONSULTÉES
+    # ══════════════════════════════════════════════════════════
+    analyse.nb_reponses_consultees = len(offres_raw)
+    for row in offres_raw:
+        analyse.reponses_consultees.append(AnalyseReponseConsultee(
+            detail_id=row.get("detail_id") or row.get("id") or 0,
+            numero_da=row["numero_da"],
+            code_article=row["code_article"],
+            designation_article=row.get("designation"),
+            code_fournisseur=row["code_fournisseur"],
+            nom_fournisseur=row.get("nom_fournisseur"),
+            prix_unitaire_ht=float(row["prix_unitaire_ht"]) if row.get("prix_unitaire_ht") else 0,
+            quantite_disponible=float(row["quantite_disponible"]) if row.get("quantite_disponible") else 0,
+            marque_proposee=row.get("marque_proposee"),
+            date_reponse=row["date_reponse"],
+            incluse=True,  # Par défaut incluse, sera mis à jour si exclue
+            raison_exclusion=None
+        ))
+
+    # ══════════════════════════════════════════════════════════
+    # 2. VÉRIFICATION STATUT DA DANS SAGE X3
     # ══════════════════════════════════════════════════════════
     logging.info("[Preview] Vérification des statuts DA dans Sage X3...")
 
@@ -676,27 +985,62 @@ async def preview_auto_bc(
 
     # Vérifier en batch dans X3
     statuts_x3 = verifier_das_x3_batch(das_articles)
-    print(f"Statuts X3: {statuts_x3}")
+
     # Filtrer les offres selon le statut X3
     offres_filtrees = []
     lignes_a_marquer_solde = []
+    das_soldees_set = set()  # Pour compter les DA distinctes soldées
+    das_non_signees_set = set()  # Pour compter les DA distinctes non signées
 
     for row in offres_raw:
         key = f"{row['numero_da']}|{row['code_article']}"
         statut_x3 = statuts_x3.get(key, {"statut": "ok"})
+        details = statut_x3.get("details", {}) or {}
+
+        # Enregistrer le statut DA dans l'analyse
+        analyse.statuts_da.append(AnalyseStatutDA(
+            numero_da=row["numero_da"],
+            code_article=row["code_article"],
+            statut_x3=statut_x3["statut"],
+            x3_signee=details.get("signee") if details else None,
+            x3_ligne_solde=details.get("ligne_solde") if details else None,
+            x3_da_solde=details.get("da_solde") if details else None,
+            message=statut_x3.get("message", "")
+        ))
 
         if statut_x3["statut"] == "solde":
             # DA soldée → marquer dans MySQL et exclure
+            analyse.nb_da_soldees += 1
+            das_soldees_set.add(row["numero_da"])  # Ajouter au set pour compter les distinctes
             lignes_a_marquer_solde.append(row["ligne_cotation_id"])
-            log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "solde")
+            log_verification_x3(row["numero_da"], row["code_article"], details, "solde")
+
+            # Marquer comme exclue dans l'analyse
+            for rep in analyse.reponses_consultees:
+                if rep.numero_da == row["numero_da"] and rep.code_article == row["code_article"]:
+                    rep.incluse = False
+                    rep.raison_exclusion = "DA soldée dans Sage X3"
 
         elif statut_x3["statut"] == "non_signe":
             # Non signé → exclure sans marquer
-            log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "ignore_non_signe")
+            analyse.nb_da_non_signees += 1
+            das_non_signees_set.add(row["numero_da"])  # Ajouter au set pour compter les distinctes
+            log_verification_x3(row["numero_da"], row["code_article"], details, "ignore_non_signe")
+
+            # Marquer comme exclue dans l'analyse
+            for rep in analyse.reponses_consultees:
+                if rep.numero_da == row["numero_da"] and rep.code_article == row["code_article"]:
+                    rep.incluse = False
+                    rep.raison_exclusion = "DA non signée dans Sage X3"
 
         else:
             # OK → garder l'offre
+            analyse.nb_da_ok += 1
             offres_filtrees.append(row)
+
+    # Mettre à jour les compteurs distincts
+    analyse.nb_da_soldees_distinct = len(das_soldees_set)
+    analyse.nb_da_non_signees_distinct = len(das_non_signees_set)
 
     # Marquer les lignes soldées dans MySQL
     if lignes_a_marquer_solde:
@@ -708,18 +1052,149 @@ async def preview_auto_bc(
     logging.info(f"[Preview] Après filtrage statut X3: {len(offres_raw)} offres restantes")
 
     # ══════════════════════════════════════════════════════════
-    # VÉRIFICATION PRIX VS TARIF X3
+    # 3. VÉRIFICATION PRIX VS TARIF X3
     # ══════════════════════════════════════════════════════════
     if offres_raw:
         logging.info("[Preview] Vérification prix vs tarif X3...")
-        offres_raw, articles_prix_sup = verifier_prix_vs_tarif_x3(offres_raw)
-        if articles_prix_sup:
-            logging.info(f"[Preview] Exclu {len(articles_prix_sup)} articles (prix > tarif X3)")
+
+        # Récupérer les tarifs X3
+        codes_articles = list(set(row["code_article"] for row in offres_raw))
+        tarifs_x3 = get_tarifs_articles_x3(codes_articles)
+
+        offres_apres_prix = []
+        for row in offres_raw:
+            code_article = row["code_article"]
+            prix = float(row["prix_unitaire_ht"])
+            tarif = tarifs_x3.get(code_article, 0.0)
+
+            if tarif > 0 and prix > tarif:
+                # Prix > tarif → exclure et enregistrer
+                ecart = prix - tarif
+                ecart_pourcent = (ecart / tarif) * 100
+
+                analyse.nb_prix_superieur += 1
+                analyse.montant_ecart_total += ecart
+                analyse.offres_prix_superieur.append(AnalysePrixSuperieur(
+                    numero_da=row["numero_da"],
+                    code_article=code_article,
+                    designation_article=row.get("designation"),
+                    code_fournisseur=row["code_fournisseur"],
+                    nom_fournisseur=row.get("nom_fournisseur"),
+                    prix_propose=prix,
+                    tarif_x3=tarif,
+                    ecart_montant=round(ecart, 2),
+                    ecart_pourcent=round(ecart_pourcent, 2)
+                ))
+
+                # Marquer comme exclue
+                for rep in analyse.reponses_consultees:
+                    if rep.numero_da == row["numero_da"] and rep.code_article == code_article and rep.code_fournisseur == row["code_fournisseur"]:
+                        rep.incluse = False
+                        rep.raison_exclusion = f"Prix ({prix:.2f}) > Tarif X3 ({tarif:.2f})"
+            else:
+                offres_apres_prix.append(row)
+
+        offres_raw = offres_apres_prix
         logging.info(f"[Preview] Après filtrage prix: {len(offres_raw)} offres restantes")
+
+    # ══════════════════════════════════════════════════════════
+    # 4. VALIDATION DES MARQUES DANS SAGE X3
+    # ══════════════════════════════════════════════════════════
+    if offres_raw:
+        logging.info("[Preview] Validation des marques dans Sage X3...")
+
+        # Vérifier les marques en batch
+        resultats_marques = verifier_marques_batch(offres_raw)
+
+        offres_apres_marque = []
+        for row in offres_raw:
+            detail_id = row.get("detail_id") or row.get("id")
+            resultat_marque = resultats_marques.get(detail_id)
+
+            if not resultat_marque:
+                # Pas de résultat = garder l'offre (fail-open)
+                offres_apres_marque.append(row)
+                continue
+
+            if resultat_marque["valide"]:
+                # Marque validée → garder l'offre
+                # Si la marque est différente (récupérée depuis XMARQA), mettre à jour
+                if resultat_marque["source"] == "xmarqa" and not row.get("marque_proposee"):
+                    # Marque était vide, on l'a récupérée depuis XMARQA
+                    marque_finale = resultat_marque["marque_finale"]
+                    row["marque_proposee"] = marque_finale
+                    row["marque_source"] = "xmarqa"
+                    analyse.nb_marque_depuis_xmarqa += 1
+
+                    # Mettre à jour reponses_consultees avec la marque finale
+                    for rep in analyse.reponses_consultees:
+                        if (rep.numero_da == row["numero_da"] and
+                            rep.code_article == row["code_article"] and
+                            rep.code_fournisseur == row["code_fournisseur"]):
+                            rep.marque_proposee = marque_finale
+
+                    # Ajouter à offres_marque_probleme pour traçabilité (avec marque_finale)
+                    analyse.offres_marque_probleme.append(AnalyseMarqueProbleme(
+                        numero_da=row["numero_da"],
+                        code_article=row["code_article"],
+                        designation_article=row.get("designation"),
+                        code_fournisseur=row["code_fournisseur"],
+                        nom_fournisseur=row.get("nom_fournisseur"),
+                        marque_souhaitee=row.get("marque_souhaitee"),
+                        marque_proposee=None,  # Était vide
+                        type_probleme="recuperee_x3",  # Nouveau type: récupérée avec succès
+                        valide_xmarqa=True,
+                        valide_historique=False,
+                        marque_finale=marque_finale,
+                        message=f"Marque récupérée depuis XMARQA: {marque_finale}"
+                    ))
+
+                offres_apres_marque.append(row)
+            else:
+                # Marque non validée → exclure et enregistrer
+                analyse.nb_marque_non_validee += 1
+
+                type_probleme = "non_validee"
+                if not row.get("marque_proposee"):
+                    type_probleme = "manquante"
+                    analyse.nb_marque_manquante += 1
+
+                analyse.offres_marque_probleme.append(AnalyseMarqueProbleme(
+                    numero_da=row["numero_da"],
+                    code_article=row["code_article"],
+                    designation_article=row.get("designation"),
+                    code_fournisseur=row["code_fournisseur"],
+                    nom_fournisseur=row.get("nom_fournisseur"),
+                    marque_souhaitee=row.get("marque_souhaitee"),
+                    marque_proposee=row.get("marque_proposee"),
+                    type_probleme=type_probleme,
+                    valide_xmarqa=False,
+                    valide_historique=False,
+                    marque_finale=resultat_marque.get("marque_finale"),
+                    message=resultat_marque.get("message")
+                ))
+
+                # Marquer comme exclue dans l'analyse
+                for rep in analyse.reponses_consultees:
+                    if (rep.numero_da == row["numero_da"] and
+                        rep.code_article == row["code_article"] and
+                        rep.code_fournisseur == row["code_fournisseur"]):
+                        rep.incluse = False
+                        rep.raison_exclusion = resultat_marque.get("message", "Marque non validée")
+
+        offres_raw = offres_apres_marque
+        logging.info(f"[Preview] Après filtrage marques: {len(offres_raw)} offres restantes")
 
     # ══════════════════════════════════════════════════════════
 
     if not offres_raw:
+        # Construire le résumé
+        analyse.resume = f"Sur {analyse.nb_reponses_consultees} réponses consultées: "
+        analyse.resume += f"{analyse.nb_da_soldees} DA soldées, "
+        analyse.resume += f"{analyse.nb_da_non_signees} DA non signées, "
+        analyse.resume += f"{analyse.nb_prix_superieur} offres prix > tarif X3, "
+        analyse.resume += f"{analyse.nb_marque_non_validee} marques non validées."
+
         return AutoBCPreviewResponse(
             config=config,
             date_preview=datetime.now(),
@@ -730,7 +1205,8 @@ async def preview_auto_bc(
             bcs_preview=[],
             nb_bc_a_creer=0,
             articles_sans_offre=[],
-            economie_totale_estimee=0.0
+            economie_totale_estimee=0.0,
+            analyse=analyse
         )
 
     # Grouper par article
@@ -796,6 +1272,17 @@ async def preview_auto_bc(
                 das_incluses=list(das_incluses)
             ))
 
+    # Construire le résumé de l'analyse
+    analyse.resume = f"Sur {analyse.nb_reponses_consultees} réponses consultées: "
+    analyse.resume += f"{analyse.nb_da_ok} DA OK, "
+    analyse.resume += f"{analyse.nb_da_soldees} DA soldées, "
+    analyse.resume += f"{analyse.nb_da_non_signees} DA non signées, "
+    analyse.resume += f"{analyse.nb_prix_superieur} prix > tarif, "
+    analyse.resume += f"{analyse.nb_marque_non_validee} marques non validées"
+    if analyse.nb_marque_depuis_xmarqa > 0:
+        analyse.resume += f" ({analyse.nb_marque_depuis_xmarqa} marques récupérées depuis XMARQA)"
+    analyse.resume += f". Résultat: {len(bcs_preview)} BC à créer avec {len(articles)} articles."
+
     return AutoBCPreviewResponse(
         config=config,
         date_preview=datetime.now(),
@@ -806,7 +1293,8 @@ async def preview_auto_bc(
         bcs_preview=bcs_preview,
         nb_bc_a_creer=len(bcs_preview),
         articles_sans_offre=[a.code_article for a in articles.values() if not a.offre_selectionnee],
-        economie_totale_estimee=round(economie_totale, 2)
+        economie_totale_estimee=round(economie_totale, 2),
+        analyse=analyse
     )
 
 
@@ -822,12 +1310,18 @@ async def executer_auto_bc(
     """
     Exécuter la génération automatique des BC.
     Crée réellement les bons de commande dans la base.
+    Inclut une analyse détaillée pour comprendre les exclusions.
     """
     start_time = time.time()
 
     # Config par défaut si non fournie
     config = request.config if request and request.config else AutoBCConfig()
     execute_par = request.execute_par if request else current_user.get("username", "SYSTEM")
+
+    # ══════════════════════════════════════════════════════════
+    # INITIALISER L'ANALYSE
+    # ══════════════════════════════════════════════════════════
+    analyse = AnalyseAutoBC()
 
     bcs_crees = []
     articles_partiels = []
@@ -842,6 +1336,7 @@ async def executer_auto_bc(
 
         if not offres_raw:
             # Pas d'offres éligibles
+            analyse.resume = "Aucune réponse fournisseur trouvée."
             duree_ms = int((time.time() - start_time) * 1000)
             log_id = execute_insert("""
                 INSERT INTO logs_auto_bc (
@@ -864,11 +1359,32 @@ async def executer_auto_bc(
                 nb_bc_crees=0,
                 bcs_crees=[],
                 economie_totale=0.0,
-                log_id=log_id
+                log_id=log_id,
+                analyse=analyse
             )
 
         # ══════════════════════════════════════════════════════════
-        # VÉRIFICATION STATUT DA DANS SAGE X3
+        # 1. COLLECTER TOUTES LES RÉPONSES CONSULTÉES
+        # ══════════════════════════════════════════════════════════
+        analyse.nb_reponses_consultees = len(offres_raw)
+        for row in offres_raw:
+            analyse.reponses_consultees.append(AnalyseReponseConsultee(
+                detail_id=row.get("detail_id") or row.get("id") or 0,
+                numero_da=row["numero_da"],
+                code_article=row["code_article"],
+                designation_article=row.get("designation"),
+                code_fournisseur=row["code_fournisseur"],
+                nom_fournisseur=row.get("nom_fournisseur"),
+                prix_unitaire_ht=float(row["prix_unitaire_ht"]) if row.get("prix_unitaire_ht") else 0,
+                quantite_disponible=float(row["quantite_disponible"]) if row.get("quantite_disponible") else 0,
+                marque_proposee=row.get("marque_proposee"),
+                date_reponse=row["date_reponse"],
+                incluse=True,
+                raison_exclusion=None
+            ))
+
+        # ══════════════════════════════════════════════════════════
+        # 2. VÉRIFICATION STATUT DA DANS SAGE X3
         # ══════════════════════════════════════════════════════════
         logging.info("Vérification des statuts DA dans Sage X3...")
 
@@ -886,26 +1402,61 @@ async def executer_auto_bc(
         lignes_a_marquer_solde = []
         articles_non_signes = []
         articles_soldes = []
+        das_soldees_set = set()  # Pour compter les DA distinctes soldées
+        das_non_signees_set = set()  # Pour compter les DA distinctes non signées
 
         for row in offres_raw:
             key = f"{row['numero_da']}|{row['code_article']}"
             statut_x3 = statuts_x3.get(key, {"statut": "ok"})
+            details = statut_x3.get("details", {}) or {}
+
+            # Enregistrer le statut DA dans l'analyse
+            analyse.statuts_da.append(AnalyseStatutDA(
+                numero_da=row["numero_da"],
+                code_article=row["code_article"],
+                statut_x3=statut_x3["statut"],
+                x3_signee=details.get("signee") if details else None,
+                x3_ligne_solde=details.get("ligne_solde") if details else None,
+                x3_da_solde=details.get("da_solde") if details else None,
+                message=statut_x3.get("message", "")
+            ))
 
             if statut_x3["statut"] == "solde":
                 # DA soldée → marquer dans MySQL et exclure
+                analyse.nb_da_soldees += 1
+                das_soldees_set.add(row["numero_da"])
                 lignes_a_marquer_solde.append(row["ligne_cotation_id"])
                 articles_soldes.append(f"{row['numero_da']}/{row['code_article']}")
-                log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "solde")
+                log_verification_x3(row["numero_da"], row["code_article"], details, "solde")
+
+                # Marquer comme exclue
+                for rep in analyse.reponses_consultees:
+                    if rep.numero_da == row["numero_da"] and rep.code_article == row["code_article"]:
+                        rep.incluse = False
+                        rep.raison_exclusion = "DA soldée dans Sage X3"
 
             elif statut_x3["statut"] == "non_signe":
                 # Non signé → exclure sans marquer (peut-être signé demain)
+                analyse.nb_da_non_signees += 1
+                das_non_signees_set.add(row["numero_da"])
                 articles_non_signes.append(f"{row['numero_da']}/{row['code_article']}")
-                log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "ignore_non_signe")
+                log_verification_x3(row["numero_da"], row["code_article"], details, "ignore_non_signe")
+
+                # Marquer comme exclue
+                for rep in analyse.reponses_consultees:
+                    if rep.numero_da == row["numero_da"] and rep.code_article == row["code_article"]:
+                        rep.incluse = False
+                        rep.raison_exclusion = "DA non signée dans Sage X3"
 
             else:
                 # OK → garder l'offre
+                analyse.nb_da_ok += 1
                 offres_filtrees.append(row)
-                log_verification_x3(row["numero_da"], row["code_article"], statut_x3.get("details"), "ok")
+                log_verification_x3(row["numero_da"], row["code_article"], details, "ok")
+
+        # Mettre à jour les compteurs distincts
+        analyse.nb_da_soldees_distinct = len(das_soldees_set)
+        analyse.nb_da_non_signees_distinct = len(das_non_signees_set)
 
         # Marquer les lignes soldées dans MySQL (pour ne plus les récupérer)
         if lignes_a_marquer_solde:
@@ -923,19 +1474,60 @@ async def executer_auto_bc(
         logging.info(f"Après filtrage statut X3: {len(offres_raw)} offres restantes")
 
         # ══════════════════════════════════════════════════════════
-        # VÉRIFICATION PRIX VS TARIF X3
+        # 3. VÉRIFICATION PRIX VS TARIF X3
         # ══════════════════════════════════════════════════════════
         if offres_raw:
             logging.info("Vérification prix vs tarif X3...")
-            offres_raw, articles_prix_sup = verifier_prix_vs_tarif_x3(offres_raw)
-            if articles_prix_sup:
-                logging.info(f"Exclu {len(articles_prix_sup)} articles (prix > tarif X3): {articles_prix_sup[:5]}...")
+
+            # Récupérer les tarifs X3
+            codes_articles = list(set(row["code_article"] for row in offres_raw))
+            tarifs_x3 = get_tarifs_articles_x3(codes_articles)
+
+            offres_apres_prix = []
+            for row in offres_raw:
+                code_article = row["code_article"]
+                prix = float(row["prix_unitaire_ht"])
+                tarif = tarifs_x3.get(code_article, 0.0)
+
+                if tarif > 0 and prix > tarif:
+                    # Prix > tarif → exclure et enregistrer
+                    ecart = prix - tarif
+                    ecart_pourcent = (ecart / tarif) * 100
+
+                    analyse.nb_prix_superieur += 1
+                    analyse.montant_ecart_total += ecart
+                    analyse.offres_prix_superieur.append(AnalysePrixSuperieur(
+                        numero_da=row["numero_da"],
+                        code_article=code_article,
+                        designation_article=row.get("designation"),
+                        code_fournisseur=row["code_fournisseur"],
+                        nom_fournisseur=row.get("nom_fournisseur"),
+                        prix_propose=prix,
+                        tarif_x3=tarif,
+                        ecart_montant=round(ecart, 2),
+                        ecart_pourcent=round(ecart_pourcent, 2)
+                    ))
+
+                    # Marquer comme exclue
+                    for rep in analyse.reponses_consultees:
+                        if rep.numero_da == row["numero_da"] and rep.code_article == code_article and rep.code_fournisseur == row["code_fournisseur"]:
+                            rep.incluse = False
+                            rep.raison_exclusion = f"Prix ({prix:.2f}) > Tarif X3 ({tarif:.2f})"
+                else:
+                    offres_apres_prix.append(row)
+
+            offres_raw = offres_apres_prix
             logging.info(f"Après filtrage prix: {len(offres_raw)} offres restantes")
 
         # ══════════════════════════════════════════════════════════
 
         if not offres_raw:
-            # Pas d'offres éligibles
+            # Construire le résumé
+            analyse.resume = f"Sur {analyse.nb_reponses_consultees} réponses: "
+            analyse.resume += f"{analyse.nb_da_soldees} DA soldées, "
+            analyse.resume += f"{analyse.nb_da_non_signees} DA non signées, "
+            analyse.resume += f"{analyse.nb_prix_superieur} prix > tarif X3."
+
             duree_ms = int((time.time() - start_time) * 1000)
 
             # Log l'exécution
@@ -950,7 +1542,7 @@ async def executer_auto_bc(
             return AutoBCExecuteResponse(
                 success=True,
                 statut=StatutExecution.SUCCES,
-                message="Aucune offre éligible trouvée",
+                message="Aucune offre éligible après filtrage",
                 date_execution=datetime.now(),
                 duree_execution_ms=duree_ms,
                 config=config,
@@ -960,7 +1552,8 @@ async def executer_auto_bc(
                 nb_bc_crees=0,
                 bcs_crees=[],
                 economie_totale=0.0,
-                log_id=log_id
+                log_id=log_id,
+                analyse=analyse
             )
 
         # Grouper par article
@@ -1138,6 +1731,14 @@ async def executer_auto_bc(
             duree_ms
         ))
 
+        # Construire le résumé de l'analyse
+        analyse.resume = f"Sur {analyse.nb_reponses_consultees} réponses consultées: "
+        analyse.resume += f"{analyse.nb_da_ok} DA OK, "
+        analyse.resume += f"{analyse.nb_da_soldees} DA soldées (exclues), "
+        analyse.resume += f"{analyse.nb_da_non_signees} DA non signées (exclues), "
+        analyse.resume += f"{analyse.nb_prix_superieur} offres prix > tarif X3 (exclues). "
+        analyse.resume += f"Résultat: {len(bcs_crees)} BC créé(s) avec {len(articles)} articles."
+
         return AutoBCExecuteResponse(
             success=statut != StatutExecution.ECHEC,
             statut=statut,
@@ -1154,7 +1755,8 @@ async def executer_auto_bc(
             articles_sans_offre=articles_sans_offre,
             articles_partiels=articles_partiels,
             erreurs=erreurs,
-            log_id=log_id
+            log_id=log_id,
+            analyse=analyse
         )
 
     except Exception as e:
@@ -1168,6 +1770,8 @@ async def executer_auto_bc(
                 statut, message_erreur, execute_par, duree_execution_ms
             ) VALUES (NOW(), %s, %s, 0, 0, 0, 'echec', %s, %s, %s)
         """, (config.code_famille, config.periode_heures, str(e), execute_par, duree_ms))
+
+        analyse.resume = f"Erreur lors de l'exécution: {str(e)}"
 
         return AutoBCExecuteResponse(
             success=False,
@@ -1183,7 +1787,8 @@ async def executer_auto_bc(
             bcs_crees=[],
             economie_totale=0.0,
             erreurs=[str(e)],
-            log_id=log_id
+            log_id=log_id,
+            analyse=analyse
         )
 
 
@@ -1336,3 +1941,98 @@ async def get_detail_log_auto_bc(
         duree_execution_ms=log.get("duree_execution_ms"),
         details=details
     )
+
+
+# ──────────────────────────────────────────────────────────
+# Endpoint : BC créés dans Sage X3 via RPA
+# ──────────────────────────────────────────────────────────
+
+@router.get("/bc-x3-rpa", response_model=BCX3ListResponse)
+async def get_bc_x3_rpa(
+    date_debut: Optional[str] = Query(default=None, description="Date début (YYYYMMDD)"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Récupérer les bons de commande créés dans Sage X3 via RPA.
+    Par défaut, récupère les BC créés depuis le 1er du mois courant.
+    """
+
+    # Date par défaut: 1er du mois courant
+    if not date_debut:
+        now = datetime.now()
+        date_debut = f"{now.year}{now.month:02d}01"
+
+    try:
+        query = """
+            SELECT
+                po.POHNUM_0     AS numero_commande,
+                po.BPSNUM_0     AS code_fournisseur,
+                po.BPRNAM_0     AS nom_fournisseur,
+                prd.PSHNUM_0    AS numero_da,
+                prd.ITMREF_0    AS code_article,
+                prd.ITMDES_0    AS designation_article,
+                prd.LINAMT_0    AS montant_ligne_ht,
+                prd.LINATIAMT_0 AS montant_ligne_ttc,
+                po.TOTLINATI_0  AS total_lignes_ttc,
+                po.TOTORD_0     AS total_commande_ht,
+                po.UPDUSR_0     AS utilisateur_modif
+            FROM BASE1.PORDER po
+            LEFT JOIN BASE1.PORDERQ poq
+                ON po.POHNUM_0 = poq.POHNUM_0
+            LEFT JOIN BASE1.PREQUISD prd
+                ON poq.PSHNUM_0 = prd.PSHNUM_0
+            WHERE po.CREUSR_0 = 'RPA'
+              AND po.CREDAT_0 > :date_debut
+            ORDER BY po.POHNUM_0 DESC, prd.ITMREF_0
+        """
+
+        rows = execute_x3_query(query, {"date_debut": date_debut})
+
+        if not rows:
+            return BCX3ListResponse(bcs=[], total=0)
+
+        # Grouper par numéro de commande
+        bcs_dict: Dict[str, BCX3Response] = {}
+
+        for row in rows:
+            numero_cmd = row["numero_commande"]
+
+            if numero_cmd not in bcs_dict:
+                bcs_dict[numero_cmd] = BCX3Response(
+                    numero_commande=numero_cmd,
+                    code_fournisseur=row["code_fournisseur"] or "",
+                    nom_fournisseur=row.get("nom_fournisseur"),
+                    total_lignes_ttc=float(row["total_lignes_ttc"]) if row.get("total_lignes_ttc") else None,
+                    total_commande_ht=float(row["total_commande_ht"]) if row.get("total_commande_ht") else None,
+                    utilisateur_modif=row.get("utilisateur_modif"),
+                    lignes=[],
+                    nb_lignes=0
+                )
+
+            # Ajouter la ligne si elle existe
+            if row.get("code_article"):
+                bcs_dict[numero_cmd].lignes.append(LigneBCX3(
+                    numero_commande=numero_cmd,
+                    code_fournisseur=row["code_fournisseur"] or "",
+                    nom_fournisseur=row.get("nom_fournisseur"),
+                    numero_da=row.get("numero_da"),
+                    code_article=row.get("code_article"),
+                    designation_article=row.get("designation_article"),
+                    montant_ligne_ht=float(row["montant_ligne_ht"]) if row.get("montant_ligne_ht") else None,
+                    montant_ligne_ttc=float(row["montant_ligne_ttc"]) if row.get("montant_ligne_ttc") else None
+                ))
+                bcs_dict[numero_cmd].nb_lignes = len(bcs_dict[numero_cmd].lignes)
+
+        bcs_list = list(bcs_dict.values())
+
+        return BCX3ListResponse(
+            bcs=bcs_list,
+            total=len(bcs_list)
+        )
+
+    except Exception as e:
+        logging.error(f"Erreur récupération BC X3 RPA: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la récupération des BC X3: {str(e)}"
+        )

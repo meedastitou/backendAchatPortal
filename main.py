@@ -26,7 +26,8 @@ from app.routers import (
     selections_router,
     x3_router,
     admin_cotations_router,
-    auto_bc_router
+    auto_bc_router,
+    sync_x3_router
 )
 
 
@@ -81,6 +82,7 @@ app.include_router(selections_router, prefix="/api")
 app.include_router(x3_router, prefix="/api")
 app.include_router(admin_cotations_router, prefix="/api")
 app.include_router(auto_bc_router, prefix="/api")
+app.include_router(sync_x3_router, prefix="/api")
 
 
 # ──────────────────────────────────────────────────────────
