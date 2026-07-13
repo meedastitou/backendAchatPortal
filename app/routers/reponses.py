@@ -7,9 +7,10 @@ ROUTER - Réponses Fournisseurs
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Optional
 import uuid as uuid_lib
+import logging
 
 from app.auth.dependencies import get_current_user
-from app.database import execute_query
+from app.database import execute_query, execute_update
 from app.schemas.reponse import (
     ReponseEnteteResponse,
     ReponseDetailResponse,
@@ -1013,3 +1014,69 @@ async def list_da_disponibles(
         "page": page,
         "limit": limit
     }
+
+
+# ──────────────────────────────────────────────────────────
+# Modifier la marque proposée d'une réponse fournisseur
+# ──────────────────────────────────────────────────────────
+
+@router.put("/detail/{detail_id}/marque")
+async def update_marque_reponse(
+    detail_id: int,
+    marque: str = Query(..., description="Nouvelle marque"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Modifier la marque proposée pour une réponse fournisseur.
+    Permet de corriger ou définir la marque avant création du BC.
+    """
+    try:
+        # Récupérer l'ancienne marque
+        detail = execute_query(
+            """
+            SELECT id, marque_proposee
+            FROM reponses_fournisseurs_detail
+            WHERE id = %s
+            """,
+            (detail_id,),
+            fetch_one=True
+        )
+
+        if not detail:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Réponse fournisseur avec id {detail_id} non trouvée"
+            )
+
+        ancienne_marque = detail.get("marque_proposee")
+        nouvelle_marque = marque.strip()
+
+        # Mettre à jour la marque
+        execute_update(
+            """
+            UPDATE reponses_fournisseurs_detail
+            SET marque_proposee = %s,
+                date_modification = NOW()
+            WHERE id = %s
+            """,
+            (nouvelle_marque, detail_id)
+        )
+
+        logging.info(f"Marque mise à jour pour detail_id={detail_id}: '{ancienne_marque}' -> '{nouvelle_marque}' par {current_user.get('username', 'unknown')}")
+
+        return {
+            "success": True,
+            "message": "Marque mise à jour avec succès",
+            "detail_id": detail_id,
+            "ancienne_marque": ancienne_marque,
+            "nouvelle_marque": nouvelle_marque
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Erreur modification marque detail_id={detail_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la modification de la marque: {str(e)}"
+        )
