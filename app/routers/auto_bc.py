@@ -1520,13 +1520,102 @@ async def executer_auto_bc(
             logging.info(f"Après filtrage prix: {len(offres_raw)} offres restantes")
 
         # ══════════════════════════════════════════════════════════
+        # 4. VALIDATION DES MARQUES DANS SAGE X3
+        # ══════════════════════════════════════════════════════════
+        if offres_raw:
+            logging.info("Validation des marques dans Sage X3...")
+
+            # Vérifier les marques en batch
+            resultats_marques = verifier_marques_batch(offres_raw)
+
+            offres_apres_marque = []
+            for row in offres_raw:
+                detail_id = row.get("detail_id") or row.get("id")
+                resultat_marque = resultats_marques.get(detail_id)
+
+                if not resultat_marque:
+                    # Pas de résultat = garder l'offre (fail-open)
+                    offres_apres_marque.append(row)
+                    continue
+
+                if resultat_marque["valide"]:
+                    # Marque validée → garder l'offre
+                    # Si la marque est différente (récupérée depuis XMARQA), mettre à jour
+                    if resultat_marque["source"] == "xmarqa" and not row.get("marque_proposee"):
+                        # Marque était vide, on l'a récupérée depuis XMARQA
+                        marque_finale = resultat_marque["marque_finale"]
+                        row["marque_proposee"] = marque_finale
+                        row["marque_source"] = "xmarqa"
+                        analyse.nb_marque_depuis_xmarqa += 1
+
+                        # Mettre à jour reponses_consultees avec la marque finale
+                        for rep in analyse.reponses_consultees:
+                            if (rep.numero_da == row["numero_da"] and
+                                rep.code_article == row["code_article"] and
+                                rep.code_fournisseur == row["code_fournisseur"]):
+                                rep.marque_proposee = marque_finale
+
+                        # Ajouter à offres_marque_probleme pour traçabilité (avec marque_finale)
+                        analyse.offres_marque_probleme.append(AnalyseMarqueProbleme(
+                            numero_da=row["numero_da"],
+                            code_article=row["code_article"],
+                            designation_article=row.get("designation"),
+                            code_fournisseur=row["code_fournisseur"],
+                            nom_fournisseur=row.get("nom_fournisseur"),
+                            marque_souhaitee=row.get("marque_souhaitee"),
+                            marque_proposee=None,  # Était vide
+                            type_probleme="recuperee_x3",  # Nouveau type: récupérée avec succès
+                            valide_xmarqa=True,
+                            valide_historique=False,
+                            marque_finale=marque_finale,
+                            message=f"Marque récupérée depuis XMARQA: {marque_finale}"
+                        ))
+
+                    offres_apres_marque.append(row)
+                else:
+                    # Marque non validée → exclure et enregistrer
+                    analyse.nb_marque_non_validee += 1
+
+                    type_probleme = "non_validee"
+                    if not row.get("marque_proposee"):
+                        type_probleme = "manquante"
+                        analyse.nb_marque_manquante += 1
+
+                    analyse.offres_marque_probleme.append(AnalyseMarqueProbleme(
+                        numero_da=row["numero_da"],
+                        code_article=row["code_article"],
+                        designation_article=row.get("designation"),
+                        code_fournisseur=row["code_fournisseur"],
+                        nom_fournisseur=row.get("nom_fournisseur"),
+                        marque_souhaitee=row.get("marque_souhaitee"),
+                        marque_proposee=row.get("marque_proposee"),
+                        type_probleme=type_probleme,
+                        valide_xmarqa=False,
+                        valide_historique=False,
+                        marque_finale=resultat_marque.get("marque_finale"),
+                        message=resultat_marque.get("message")
+                    ))
+
+                    # Marquer comme exclue dans l'analyse
+                    for rep in analyse.reponses_consultees:
+                        if (rep.numero_da == row["numero_da"] and
+                            rep.code_article == row["code_article"] and
+                            rep.code_fournisseur == row["code_fournisseur"]):
+                            rep.incluse = False
+                            rep.raison_exclusion = resultat_marque.get("message", "Marque non validée")
+
+            offres_raw = offres_apres_marque
+            logging.info(f"Après filtrage marques: {len(offres_raw)} offres restantes")
+
+        # ══════════════════════════════════════════════════════════
 
         if not offres_raw:
             # Construire le résumé
             analyse.resume = f"Sur {analyse.nb_reponses_consultees} réponses: "
             analyse.resume += f"{analyse.nb_da_soldees} DA soldées, "
             analyse.resume += f"{analyse.nb_da_non_signees} DA non signées, "
-            analyse.resume += f"{analyse.nb_prix_superieur} prix > tarif X3."
+            analyse.resume += f"{analyse.nb_prix_superieur} prix > tarif X3, "
+            analyse.resume += f"{analyse.nb_marque_non_validee} marques non validées."
 
             duree_ms = int((time.time() - start_time) * 1000)
 
@@ -1736,8 +1825,11 @@ async def executer_auto_bc(
         analyse.resume += f"{analyse.nb_da_ok} DA OK, "
         analyse.resume += f"{analyse.nb_da_soldees} DA soldées (exclues), "
         analyse.resume += f"{analyse.nb_da_non_signees} DA non signées (exclues), "
-        analyse.resume += f"{analyse.nb_prix_superieur} offres prix > tarif X3 (exclues). "
-        analyse.resume += f"Résultat: {len(bcs_crees)} BC créé(s) avec {len(articles)} articles."
+        analyse.resume += f"{analyse.nb_prix_superieur} offres prix > tarif X3 (exclues), "
+        analyse.resume += f"{analyse.nb_marque_non_validee} marques non validées (exclues)"
+        if analyse.nb_marque_depuis_xmarqa > 0:
+            analyse.resume += f" ({analyse.nb_marque_depuis_xmarqa} marques récupérées depuis XMARQA)"
+        analyse.resume += f". Résultat: {len(bcs_crees)} BC créé(s) avec {len(articles)} articles."
 
         return AutoBCExecuteResponse(
             success=statut != StatutExecution.ECHEC,
