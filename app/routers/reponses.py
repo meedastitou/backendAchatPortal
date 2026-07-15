@@ -5,9 +5,11 @@ ROUTER - Réponses Fournisseurs
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import FileResponse
 from typing import Optional
 import uuid as uuid_lib
 import logging
+import os
 
 from app.auth.dependencies import get_current_user
 from app.database import execute_query, execute_update
@@ -40,6 +42,9 @@ async def list_reponses(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     code_fournisseur: Optional[str] = None,
+    search_rfq: Optional[str] = None,
+    search_fournisseur: Optional[str] = None,
+    search_da: Optional[str] = None,
     date_debut: Optional[datetime] = None,
     date_fin: Optional[datetime] = None,
     current_user: dict = Depends(get_current_user)
@@ -48,10 +53,25 @@ async def list_reponses(
 
     conditions = ["1=1"]
     params = []
+    need_lc_join = False
 
     if code_fournisseur:
         conditions.append("dc.code_fournisseur = %s")
         params.append(code_fournisseur)
+
+    if search_rfq:
+        conditions.append("dc.numero_rfq LIKE %s")
+        params.append(f"%{search_rfq}%")
+
+    if search_fournisseur:
+        conditions.append("(dc.code_fournisseur LIKE %s OR f.nom_fournisseur LIKE %s)")
+        params.append(f"%{search_fournisseur}%")
+        params.append(f"%{search_fournisseur}%")
+
+    if search_da:
+        conditions.append("lc.numero_da LIKE %s")
+        params.append(f"%{search_da}%")
+        need_lc_join = True
 
     if date_debut:
         conditions.append("re.date_reponse >= %s")
@@ -63,11 +83,19 @@ async def list_reponses(
 
     where_clause = " AND ".join(conditions)
 
-    # Count
+    # Jointure optionnelle avec lignes_cotation si recherche par DA
+    lc_join = """
+        JOIN reponses_fournisseurs_detail rd ON re.id = rd.reponse_entete_id
+        JOIN lignes_cotation lc ON rd.ligne_cotation_id = lc.id
+    """ if need_lc_join else ""
+
+    # Count (avec DISTINCT si jointure LC pour éviter les doublons)
     count_query = f"""
-        SELECT COUNT(*) as total
+        SELECT COUNT(DISTINCT re.id) as total
         FROM reponses_fournisseurs_entete re
         JOIN demandes_cotation dc ON re.rfq_uuid = dc.uuid
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        {lc_join}
         WHERE {where_clause}
     """
     total = execute_query(count_query, tuple(params), fetch_one=True)["total"]
@@ -75,7 +103,7 @@ async def list_reponses(
     # Get entetes
     offset = (page - 1) * limit
     query = f"""
-        SELECT
+        SELECT DISTINCT
             re.*,
             dc.numero_rfq,
             dc.code_fournisseur,
@@ -83,6 +111,7 @@ async def list_reponses(
         FROM reponses_fournisseurs_entete re
         JOIN demandes_cotation dc ON re.rfq_uuid = dc.uuid
         JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        {lc_join}
         WHERE {where_clause}
         ORDER BY re.date_reponse DESC
         LIMIT %s OFFSET %s
@@ -1080,3 +1109,47 @@ async def update_marque_reponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur lors de la modification de la marque: {str(e)}"
         )
+
+
+# ──────────────────────────────────────────────────────────
+# Récupérer le PDF du devis fournisseur
+# ──────────────────────────────────────────────────────────
+
+# Chemin vers le dossier uploads du formulaire PHP
+UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "formulaire")
+
+
+@router.get("/devis/pdf")
+async def get_devis_pdf(
+    filename: str = Query(..., description="Chemin du fichier PDF"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Récupérer le fichier PDF du devis fournisseur.
+    Le filename est le chemin relatif stocké en BDD (ex: uploads/2024/03/fichier.pdf)
+    """
+    # Sécurité: empêcher la traversée de répertoire
+    if ".." in filename or filename.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Chemin de fichier invalide"
+        )
+
+    # Construire le chemin complet
+    filepath = os.path.join(UPLOADS_DIR, filename)
+    filepath = os.path.normpath(filepath)
+
+    # Vérifier que le fichier existe
+    if not os.path.isfile(filepath):
+        logging.warning(f"Fichier PDF non trouvé: {filepath}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Fichier non trouvé"
+        )
+
+    # Retourner le fichier
+    return FileResponse(
+        path=filepath,
+        media_type="application/pdf",
+        filename=os.path.basename(filename)
+    )
