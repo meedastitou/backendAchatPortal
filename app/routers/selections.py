@@ -700,7 +700,7 @@ async def generer_bc_from_pre_bc(
             "Acheteur": acheteur,
             "Code_Fournisseur": sel["code_fournisseur"],
             "Email_Fournisseur": email_fournisseur or "",
-            "TEL_Fournisseu": tel_fournisseur or "",
+            "TEL_Fournisseur": tel_fournisseur or "",
             "Code_Article": sel["code_article"],
             "Montant": float(sel["prix_selectionne"]),
             "Marque": marque,
