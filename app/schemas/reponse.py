@@ -242,3 +242,81 @@ class ReponseAcheteurListResponse(BaseModel):
     total: int
     page: int
     limit: int
+
+
+# ──────────────────────────────────────────────────────────
+# Saisie Devis par RFQ existant
+# ──────────────────────────────────────────────────────────
+
+class LigneDevisRFQ(BaseModel):
+    """Ligne de devis pour un RFQ existant"""
+    ligne_cotation_id: int
+    code_article: str
+    prix_unitaire_ht: Optional[float] = None
+    quantite_disponible: Optional[float] = None
+    delai_livraison_jours: Optional[int] = None
+    marque_proposee: Optional[str] = None
+    commentaire_article: Optional[str] = None
+
+
+class SaisieDevisRFQRequest(BaseModel):
+    """Requête pour saisir un devis sur un RFQ existant"""
+    rfq_uuid: str
+    reference_fournisseur: Optional[str] = None
+    devise: str = "MAD"
+    conditions_paiement: Optional[str] = None
+    commentaire_global: Optional[str] = None
+    lignes: List[LigneDevisRFQ]
+
+
+class RFQPourSaisie(BaseModel):
+    """RFQ disponible pour la saisie de devis"""
+    uuid: str
+    numero_rfq: str
+    code_fournisseur: str
+    nom_fournisseur: str
+    email_fournisseur: Optional[str] = None
+    date_envoi: datetime
+    statut: str
+    nb_articles: int
+
+    class Config:
+        from_attributes = True
+
+
+class RFQPourSaisieListResponse(BaseModel):
+    """Liste des RFQs disponibles pour saisie"""
+    rfqs: List[RFQPourSaisie]
+    total: int
+    page: int
+    limit: int
+
+
+class LigneCotationPourSaisie(BaseModel):
+    """Ligne de cotation pour la saisie de devis"""
+    id: int
+    code_article: str
+    designation_article: Optional[str] = None
+    quantite_demandee: float
+    unite: Optional[str] = None
+    marque_souhaitee: Optional[str] = None
+    numero_da: str
+    tarif_reference: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RFQDetailPourSaisie(BaseModel):
+    """Détail d'un RFQ pour la saisie de devis"""
+    uuid: str
+    numero_rfq: str
+    code_fournisseur: str
+    nom_fournisseur: str
+    email_fournisseur: Optional[str] = None
+    date_envoi: datetime
+    statut: str
+    lignes: List[LigneCotationPourSaisie]
+
+    class Config:
+        from_attributes = True

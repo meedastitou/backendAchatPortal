@@ -12,7 +12,7 @@ import logging
 import os
 
 from app.auth.dependencies import get_current_user
-from app.database import execute_query, execute_update
+from app.database import execute_query, execute_update, execute_insert
 from app.schemas.reponse import (
     ReponseEnteteResponse,
     ReponseDetailResponse,
@@ -25,7 +25,14 @@ from app.schemas.reponse import (
     ReponseAcheteurResponse,
     ReponseAcheteurComplete,
     ReponseAcheteurListResponse,
-    LigneReponseAcheteurDetail
+    LigneReponseAcheteurDetail,
+    # Saisie Devis RFQ
+    LigneDevisRFQ,
+    SaisieDevisRFQRequest,
+    RFQPourSaisie,
+    RFQPourSaisieListResponse,
+    LigneCotationPourSaisie,
+    RFQDetailPourSaisie
 )
 from datetime import datetime
 
@@ -1153,3 +1160,284 @@ async def get_devis_pdf(
         media_type="application/pdf",
         filename=os.path.basename(filename)
     )
+
+
+# ──────────────────────────────────────────────────────────
+# Saisie Devis par RFQ existant
+# ──────────────────────────────────────────────────────────
+
+@router.get("/saisie-rfq/rfqs-disponibles", response_model=RFQPourSaisieListResponse)
+async def list_rfqs_pour_saisie(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    code_fournisseur: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Lister les RFQs disponibles pour saisie de devis.
+    Filtre les RFQ avec statut: envoye, vu, relance_1, relance_2, relance_3
+    Exclut les RFQ déjà répondus.
+    """
+    conditions = ["dc.statut IN ('envoye', 'vu', 'relance_1', 'relance_2', 'relance_3')"]
+    params = []
+
+    if code_fournisseur:
+        conditions.append("dc.code_fournisseur = %s")
+        params.append(code_fournisseur)
+
+    if search:
+        conditions.append("(dc.numero_rfq LIKE %s OR f.nom_fournisseur LIKE %s)")
+        search_pattern = f"%{search}%"
+        params.extend([search_pattern, search_pattern])
+
+    where_clause = " AND ".join(conditions)
+
+    # Count
+    count_query = f"""
+        SELECT COUNT(DISTINCT dc.id) as total
+        FROM demandes_cotation dc
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        WHERE {where_clause}
+    """
+    total = execute_query(count_query, tuple(params) if params else None, fetch_one=True)["total"]
+
+    # Get RFQs
+    offset = (page - 1) * limit
+    query = f"""
+        SELECT
+            dc.uuid,
+            dc.numero_rfq,
+            dc.code_fournisseur,
+            f.nom_fournisseur,
+            f.email as email_fournisseur,
+            dc.date_envoi,
+            dc.statut,
+            (SELECT COUNT(*) FROM lignes_cotation lc WHERE lc.rfq_uuid = dc.uuid) as nb_articles
+        FROM demandes_cotation dc
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        WHERE {where_clause}
+        ORDER BY dc.date_envoi DESC
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+    rfqs = execute_query(query, tuple(params))
+
+    return RFQPourSaisieListResponse(
+        rfqs=[RFQPourSaisie(**rfq) for rfq in rfqs],
+        total=total,
+        page=page,
+        limit=limit
+    )
+
+
+@router.get("/saisie-rfq/rfq/{rfq_uuid}", response_model=RFQDetailPourSaisie)
+async def get_rfq_pour_saisie(
+    rfq_uuid: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Obtenir le détail d'un RFQ pour la saisie de devis.
+    Retourne les lignes de cotation avec leurs informations.
+    """
+    # Get RFQ
+    query = """
+        SELECT
+            dc.uuid,
+            dc.numero_rfq,
+            dc.code_fournisseur,
+            f.nom_fournisseur,
+            f.email as email_fournisseur,
+            dc.date_envoi,
+            dc.statut
+        FROM demandes_cotation dc
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        WHERE dc.uuid = %s
+    """
+    rfq = execute_query(query, (rfq_uuid,), fetch_one=True)
+
+    if not rfq:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="RFQ non trouvé"
+        )
+
+    # Vérifier que la RFQ n'a pas déjà une réponse
+    existing_response = execute_query(
+        "SELECT id FROM reponses_fournisseurs_entete WHERE rfq_uuid = %s",
+        (rfq_uuid,),
+        fetch_one=True
+    )
+
+    if existing_response:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ce RFQ a déjà une réponse enregistrée"
+        )
+
+    # Get lignes de cotation avec info article
+    lignes = execute_query(
+        """
+        SELECT
+            lc.id,
+            lc.code_article,
+            lc.designation_article,
+            lc.quantite_demandee,
+            lc.unite,
+            lc.marque_souhaitee,
+            lc.numero_da,
+            ar.prix_base as tarif_reference
+        FROM lignes_cotation lc
+        LEFT JOIN articles_ref ar ON lc.code_article = ar.code_article
+        WHERE lc.rfq_uuid = %s
+          AND (lc.actif = TRUE OR lc.actif IS NULL)
+        ORDER BY lc.code_article
+        """,
+        (rfq_uuid,)
+    )
+
+    return RFQDetailPourSaisie(
+        **rfq,
+        lignes=[LigneCotationPourSaisie(**l) for l in lignes]
+    )
+
+
+@router.post("/saisie-rfq", response_model=ReponseAcheteurResponse)
+async def saisie_devis_rfq(
+    request: SaisieDevisRFQRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Saisir un devis pour un RFQ existant.
+    Crée une entrée dans reponses_fournisseurs_entete et reponses_fournisseurs_detail.
+    Met à jour le statut du RFQ à 'repondu'.
+    """
+    if not request.lignes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Au moins une ligne est requise"
+        )
+
+    # 1. Vérifier que le RFQ existe
+    rfq = execute_query(
+        """
+        SELECT dc.uuid, dc.numero_rfq, dc.code_fournisseur, dc.statut
+        FROM demandes_cotation dc
+        WHERE dc.uuid = %s
+        """,
+        (request.rfq_uuid,),
+        fetch_one=True
+    )
+
+    if not rfq:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="RFQ non trouvé"
+        )
+
+    # 2. Vérifier que le RFQ n'a pas déjà une réponse
+    existing_response = execute_query(
+        "SELECT id FROM reponses_fournisseurs_entete WHERE rfq_uuid = %s",
+        (request.rfq_uuid,),
+        fetch_one=True
+    )
+
+    if existing_response:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ce RFQ a déjà une réponse enregistrée"
+        )
+
+    # 3. Vérifier que les lignes de cotation existent
+    ligne_ids = [l.ligne_cotation_id for l in request.lignes]
+    placeholders = ",".join(["%s"] * len(ligne_ids))
+    existing_lignes = execute_query(
+        f"""
+        SELECT id, code_article FROM lignes_cotation
+        WHERE id IN ({placeholders}) AND rfq_uuid = %s
+        """,
+        (*ligne_ids, request.rfq_uuid)
+    )
+
+    if len(existing_lignes) != len(ligne_ids):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Certaines lignes de cotation n'existent pas ou n'appartiennent pas à ce RFQ"
+        )
+
+    try:
+        # 4. Créer l'entête de réponse
+        now = datetime.now()
+        reponse_entete_id = execute_insert(
+            """
+            INSERT INTO reponses_fournisseurs_entete (
+                rfq_uuid, reference_fournisseur, devise,
+                methodes_paiement, commentaire, date_reponse,
+                saisie_manuelle, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s)
+            """,
+            (
+                request.rfq_uuid,
+                request.reference_fournisseur,
+                request.devise,
+                request.conditions_paiement,
+                request.commentaire_global,
+                now,
+                now
+            )
+        )
+
+        # 5. Créer les détails de réponse pour chaque ligne
+        from datetime import timedelta
+        for ligne in request.lignes:
+            # Calculer date_livraison si délai fourni
+            date_livraison = None
+            if ligne.delai_livraison_jours:
+                date_livraison = now + timedelta(days=ligne.delai_livraison_jours)
+
+            execute_insert(
+                """
+                INSERT INTO reponses_fournisseurs_detail (
+                    reponse_entete_id, rfq_uuid, ligne_cotation_id, code_article,
+                    prix_unitaire_ht, quantite_disponible, date_livraison,
+                    marque_proposee, commentaire_article
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    reponse_entete_id,
+                    request.rfq_uuid,
+                    ligne.ligne_cotation_id,
+                    ligne.code_article,
+                    ligne.prix_unitaire_ht,
+                    ligne.quantite_disponible,
+                    date_livraison,
+                    ligne.marque_proposee,
+                    ligne.commentaire_article
+                )
+            )
+
+        # 6. Mettre à jour le statut du RFQ
+        execute_update(
+            """
+            UPDATE demandes_cotation
+            SET statut = 'repondu', date_reponse = %s
+            WHERE uuid = %s
+            """,
+            (now, request.rfq_uuid)
+        )
+
+        logging.info(f"Devis saisi pour RFQ {rfq['numero_rfq']} par {current_user.get('username', 'unknown')}")
+
+        return ReponseAcheteurResponse(
+            success=True,
+            message=f"Devis enregistré avec succès pour {rfq['numero_rfq']}",
+            numero_rfq=rfq["numero_rfq"],
+            nb_lignes=len(request.lignes)
+        )
+
+    except Exception as e:
+        logging.error(f"Erreur saisie devis RFQ: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la saisie: {str(e)}"
+        )
