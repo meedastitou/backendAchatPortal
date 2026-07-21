@@ -317,10 +317,11 @@ class AnalyseMarqueProbleme(BaseModel):
     nom_fournisseur: Optional[str] = None
     marque_souhaitee: Optional[str] = None
     marque_proposee: Optional[str] = None
-    type_probleme: str  # 'manquante', 'differente', 'non_validee'
+    type_probleme: str  # 'manquante', 'differente', 'non_validee', 'recuperee_x3'
     valide_xmarqa: bool = False  # Existe dans XMARQA
     valide_historique: bool = False  # Existe dans historique achats
-    marque_finale: Optional[str] = None  # Marque à utiliser (peut être depuis XMARQA)
+    marque_finale: Optional[str] = None  # Marque à utiliser (peut être depuis X3)
+    origine_marque: Optional[str] = None  # Source de la marque: 'DA', 'BC', 'BR', 'Table Article (XMARQA)'
     message: Optional[str] = None  # Message explicatif
 
 

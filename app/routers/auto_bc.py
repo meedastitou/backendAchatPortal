@@ -468,41 +468,110 @@ def get_marque_defaut_x3(code_article: str) -> Optional[str]:
         return None
 
 
-def get_marques_defaut_batch(codes_articles: List[str]) -> Dict[str, str]:
+def get_marques_defaut_batch(offres: List[dict]) -> Dict[str, Dict[str, str]]:
     """
     Récupérer les marques par défaut pour plusieurs articles en batch.
 
+    Ordre de priorité pour la marque:
+    1. Marque sur la DA (PREQUISD.XMARQ_0)
+    2. Marque sur le BC le plus récent (PORDERQ.XMARQ_0)
+    3. Marque sur le BR le plus récent (PRECEIPTD.XMARQ_0)
+    4. Marque globale Article (XMARQA.XMARQ_0)
+
+    Args:
+        offres: Liste de dict contenant au minimum code_article, numero_da, code_fournisseur
+
     Returns:
-        Dict avec code_article comme clé et marque comme valeur
+        Dict avec code_article comme clé et dict {"marque": str, "origine": str} comme valeur
+        Origines possibles: "DA", "BC", "BR", "Table Article (XMARQA)", "Aucune (Par défaut)"
     """
-    if not codes_articles:
+    if not offres:
         return {}
 
     marques = {}
 
     try:
-        # Construire la requête avec IN
-        placeholders = ", ".join([f":art_{i}" for i in range(len(codes_articles))])
-        params = {f"art_{i}": code for i, code in enumerate(codes_articles)}
+        # Traiter chaque offre individuellement car la requête dépend du contexte DA/Fournisseur
+        for offre in offres:
+            code_article = offre.get("code_article")
+            numero_da = offre.get("numero_da")
+            code_fournisseur = offre.get("code_fournisseur")
 
-        query = f"""
-            SELECT ITMREF_0 AS code_article, XMARQ_0 AS marque_article
-            FROM BASE1.XMARQA
-            WHERE ITMREF_0 IN ({placeholders})
-              AND XMARQ_0 IS NOT NULL
-              AND XMARQ_0 != ''
-        """
+            if not code_article:
+                continue
 
-        rows = execute_x3_query(query, params)
+            # Si on a déjà traité cet article, passer au suivant
+            if code_article in marques:
+                continue
 
-        if rows:
-            for row in rows:
-                code = row["code_article"]
-                # Prendre la première marque trouvée pour chaque article
-                if code not in marques:
-                    marques[code] = row["marque_article"]
+            query = """
+                SELECT
+                    PRD.PSHNUM_0 AS Num_DA,
+                    PRD.ITMREF_0 AS Code_Article,
 
-        logging.info(f"Récupéré {len(marques)} marques par défaut depuis X3")
+                    COALESCE(
+                        NULLIF(NULLIF(PRD.XMARQ_0, ''), 'ND'),
+                        NULLIF(NULLIF(PRQ.XMARQ_0, ''), 'ND'),
+                        NULLIF(NULLIF(PRPD.XMARQ_0, ''), 'ND'),
+                        NULLIF(NULLIF(X.XMARQ_0, ''), 'ND')
+                    ) AS Marque_Finale,
+                    CASE
+                        WHEN PRD.XMARQ_0 IS NOT NULL AND PRD.XMARQ_0 <> '' AND PRD.XMARQ_0 <> 'ND' THEN 'DA'
+                        WHEN PRQ.XMARQ_0 IS NOT NULL AND PRQ.XMARQ_0 <> '' AND PRQ.XMARQ_0 <> 'ND' THEN 'BC'
+                        WHEN PRPD.XMARQ_0 IS NOT NULL AND PRPD.XMARQ_0 <> '' AND PRPD.XMARQ_0 <> 'ND' THEN 'BR'
+                        WHEN X.XMARQ_0 IS NOT NULL AND X.XMARQ_0 <> '' AND X.XMARQ_0 <> 'ND' THEN 'Table Article (XMARQA)'
+                        ELSE 'Aucune (Par défaut)'
+                    END AS Origine_Marque,
+                    PRD.XMARQ_0 AS Marque_DA,
+                    PRQ.XMARQ_0 AS Marque_BC,
+                    PRPD.XMARQ_0 AS Marque_BR,
+                    X.XMARQ_0 AS Marque_Base_Article
+
+                FROM BASE1.PREQUISD PRD
+
+                LEFT JOIN (
+                    SELECT TOP 1 ITMREF_0, XMARQ_0
+                    FROM BASE1.PORDERQ
+                    WHERE BPSNUM_0 = :code_fournisseur AND ITMREF_0 = :code_article
+                    ORDER BY CREDAT_0 DESC
+                ) PRQ ON PRQ.ITMREF_0 = PRD.ITMREF_0
+
+                LEFT JOIN (
+                    SELECT TOP 1 ITMREF_0, XMARQ_0
+                    FROM BASE1.PRECEIPTD
+                    WHERE BPSNUM_0 = :code_fournisseur AND ITMREF_0 = :code_article
+                    ORDER BY CREDAT_0 DESC
+                ) PRPD ON PRPD.ITMREF_0 = PRD.ITMREF_0
+
+                LEFT JOIN (
+                    SELECT TOP 1 ITMREF_0, XMARQ_0
+                    FROM BASE1.XMARQA
+                    WHERE ITMREF_0 = :code_article
+                ) X ON X.ITMREF_0 = PRD.ITMREF_0
+
+                WHERE PRD.PSHNUM_0 = :numero_da
+                  AND PRD.ITMREF_0 = :code_article
+            """
+
+            params = {
+                "code_article": code_article,
+                "numero_da": numero_da,
+                "code_fournisseur": code_fournisseur or ""
+            }
+
+            rows = execute_x3_query(query, params)
+
+            if rows and rows[0].get("Marque_Finale"):
+                origine = rows[0].get("Origine_Marque", "Aucune (Par défaut)")
+                marques[code_article] = {
+                    "marque": rows[0]["Marque_Finale"],
+                    "origine": origine
+                }
+                logging.debug(f"Marque pour {code_article}: {rows[0]['Marque_Finale']} - Origine: {origine} "
+                             f"(DA={rows[0].get('Marque_DA')}, BC={rows[0].get('Marque_BC')}, "
+                             f"BR={rows[0].get('Marque_BR')}, Base={rows[0].get('Marque_Base_Article')})")
+
+        logging.info(f"Récupéré {len(marques)} marques par défaut depuis X3 (priorité DA>BC>BR>XMARQA)")
 
     except Exception as e:
         logging.error(f"Erreur récupération marques défaut batch: {e}")
@@ -525,9 +594,15 @@ def verifier_marques_batch(offres: List[dict]) -> Dict[str, Dict]:
         {
             "valide": bool,
             "marque_finale": str (marque à utiliser),
-            "source": "proposee" | "xmarqa" | "historique" | None,
+            "source": "proposee" | "xmarqa" | "historique" | "x3_priorite" | None,
             "message": str
         }
+
+        Sources:
+        - "x3_priorite": Marque récupérée via priorité DA>BC>BR>XMARQA (quand marque était vide)
+        - "xmarqa": Marque proposée validée dans XMARQA
+        - "historique": Marque proposée validée dans historique achats
+        - "proposee": Marque proposée directement utilisée
     """
     resultats = {}
 
@@ -550,21 +625,23 @@ def verifier_marques_batch(offres: List[dict]) -> Dict[str, Dict]:
 
     # 1. Traiter les offres SANS marque proposée → récupérer marque par défaut
     if offres_sans_marque:
-        codes_uniques = list(set(o["code_article"] for o in offres_sans_marque))
-        marques_defaut = get_marques_defaut_batch(codes_uniques)
+        marques_defaut = get_marques_defaut_batch(offres_sans_marque)
 
         for offre in offres_sans_marque:
             detail_id = offre.get("detail_id") or offre.get("id")
             code_article = offre["code_article"]
 
-            marque_defaut = marques_defaut.get(code_article)
+            marque_info = marques_defaut.get(code_article)
 
-            if marque_defaut:
+            if marque_info:
+                marque_defaut = marque_info["marque"]
+                origine_marque = marque_info["origine"]
                 resultats[detail_id] = {
                     "valide": True,
                     "marque_finale": marque_defaut,
-                    "source": "xmarqa",
-                    "message": f"Marque par défaut depuis XMARQA: {marque_defaut}"
+                    "source": "x3_priorite",
+                    "origine_marque": origine_marque,
+                    "message": f"Marque récupérée depuis {origine_marque}: {marque_defaut}"
                 }
             else:
                 resultats[detail_id] = {
@@ -787,10 +864,10 @@ def get_offres_eligibles(config: AutoBCConfig) -> List[dict]:
             (lc.x3_solde = FALSE OR lc.x3_solde IS NULL)
 
             -- Pas déjà commandé
-            AND NOT EXISTS (
-                SELECT 1 FROM lignes_bon_commande lbc
-                WHERE lbc.ligne_source_id = rd.id
-            )
+            # AND NOT EXISTS (
+            #     SELECT 1 FROM lignes_bon_commande lbc
+            #     WHERE lbc.ligne_source_id = rd.id
+            # )
             AND rd.prix_unitaire_ht > 0
             AND rd.quantite_disponible > 0
             -- AND rd.marque_proposee is not NULL
@@ -1118,12 +1195,14 @@ async def preview_auto_bc(
 
             if resultat_marque["valide"]:
                 # Marque validée → garder l'offre
-                # Si la marque est différente (récupérée depuis XMARQA), mettre à jour
-                if resultat_marque["source"] == "xmarqa" and not row.get("marque_proposee"):
-                    # Marque était vide, on l'a récupérée depuis XMARQA
+                # Si la marque est différente (récupérée depuis X3 avec priorité DA>BC>BR>XMARQA), mettre à jour
+                if resultat_marque["source"] == "x3_priorite" and not row.get("marque_proposee"):
+                    # Marque était vide, on l'a récupérée depuis X3 (DA>BC>BR>XMARQA)
                     marque_finale = resultat_marque["marque_finale"]
+                    origine_marque = resultat_marque.get("origine_marque", "X3")
                     row["marque_proposee"] = marque_finale
-                    row["marque_source"] = "xmarqa"
+                    row["marque_source"] = "x3_priorite"
+                    row["origine_marque"] = origine_marque
                     analyse.nb_marque_depuis_xmarqa += 1
 
                     # Mettre à jour reponses_consultees avec la marque finale
@@ -1133,7 +1212,7 @@ async def preview_auto_bc(
                             rep.code_fournisseur == row["code_fournisseur"]):
                             rep.marque_proposee = marque_finale
 
-                    # Ajouter à offres_marque_probleme pour traçabilité (avec marque_finale)
+                    # Ajouter à offres_marque_probleme pour traçabilité (avec marque_finale et origine)
                     analyse.offres_marque_probleme.append(AnalyseMarqueProbleme(
                         numero_da=row["numero_da"],
                         code_article=row["code_article"],
@@ -1146,7 +1225,8 @@ async def preview_auto_bc(
                         valide_xmarqa=True,
                         valide_historique=False,
                         marque_finale=marque_finale,
-                        message=f"Marque récupérée depuis XMARQA: {marque_finale}"
+                        origine_marque=origine_marque,
+                        message=f"Marque récupérée depuis {origine_marque}: {marque_finale}"
                     ))
 
                 offres_apres_marque.append(row)
@@ -1280,7 +1360,7 @@ async def preview_auto_bc(
     analyse.resume += f"{analyse.nb_prix_superieur} prix > tarif, "
     analyse.resume += f"{analyse.nb_marque_non_validee} marques non validées"
     if analyse.nb_marque_depuis_xmarqa > 0:
-        analyse.resume += f" ({analyse.nb_marque_depuis_xmarqa} marques récupérées depuis XMARQA)"
+        analyse.resume += f" ({analyse.nb_marque_depuis_xmarqa} marques récupérées depuis X3 DA>BC>BR>XMARQA)"
     analyse.resume += f". Résultat: {len(bcs_preview)} BC à créer avec {len(articles)} articles."
 
     return AutoBCPreviewResponse(
@@ -1540,12 +1620,14 @@ async def executer_auto_bc(
 
                 if resultat_marque["valide"]:
                     # Marque validée → garder l'offre
-                    # Si la marque est différente (récupérée depuis XMARQA), mettre à jour
-                    if resultat_marque["source"] == "xmarqa" and not row.get("marque_proposee"):
-                        # Marque était vide, on l'a récupérée depuis XMARQA
+                    # Si la marque est différente (récupérée depuis X3 avec priorité DA>BC>BR>XMARQA), mettre à jour
+                    if resultat_marque["source"] == "x3_priorite" and not row.get("marque_proposee"):
+                        # Marque était vide, on l'a récupérée depuis X3 (DA>BC>BR>XMARQA)
                         marque_finale = resultat_marque["marque_finale"]
+                        origine_marque = resultat_marque.get("origine_marque", "X3")
                         row["marque_proposee"] = marque_finale
-                        row["marque_source"] = "xmarqa"
+                        row["marque_source"] = "x3_priorite"
+                        row["origine_marque"] = origine_marque
                         analyse.nb_marque_depuis_xmarqa += 1
 
                         # Mettre à jour reponses_consultees avec la marque finale
@@ -1555,7 +1637,7 @@ async def executer_auto_bc(
                                 rep.code_fournisseur == row["code_fournisseur"]):
                                 rep.marque_proposee = marque_finale
 
-                        # Ajouter à offres_marque_probleme pour traçabilité (avec marque_finale)
+                        # Ajouter à offres_marque_probleme pour traçabilité (avec marque_finale et origine)
                         analyse.offres_marque_probleme.append(AnalyseMarqueProbleme(
                             numero_da=row["numero_da"],
                             code_article=row["code_article"],
@@ -1568,7 +1650,8 @@ async def executer_auto_bc(
                             valide_xmarqa=True,
                             valide_historique=False,
                             marque_finale=marque_finale,
-                            message=f"Marque récupérée depuis XMARQA: {marque_finale}"
+                            origine_marque=origine_marque,
+                            message=f"Marque récupérée depuis {origine_marque}: {marque_finale}"
                         ))
 
                     offres_apres_marque.append(row)
@@ -1828,7 +1911,7 @@ async def executer_auto_bc(
         analyse.resume += f"{analyse.nb_prix_superieur} offres prix > tarif X3 (exclues), "
         analyse.resume += f"{analyse.nb_marque_non_validee} marques non validées (exclues)"
         if analyse.nb_marque_depuis_xmarqa > 0:
-            analyse.resume += f" ({analyse.nb_marque_depuis_xmarqa} marques récupérées depuis XMARQA)"
+            analyse.resume += f" ({analyse.nb_marque_depuis_xmarqa} marques récupérées depuis X3 DA>BC>BR>XMARQA)"
         analyse.resume += f". Résultat: {len(bcs_crees)} BC créé(s) avec {len(articles)} articles."
 
         return AutoBCExecuteResponse(
@@ -2072,7 +2155,7 @@ async def get_bc_x3_rpa(
             LEFT JOIN BASE1.PORDERQ poq
                 ON po.POHNUM_0 = poq.POHNUM_0
             LEFT JOIN BASE1.PREQUISD prd
-                ON poq.PSHNUM_0 = prd.PSHNUM_0
+                ON poq.PSHNUM_0 = prd.PSHNUM_0 and poq.ITMREF_0 = prd.ITMREF_0
             WHERE po.CREUSR_0 = 'RPA'
               AND po.CREDAT_0 > :date_debut
             ORDER BY po.POHNUM_0 DESC, prd.ITMREF_0
