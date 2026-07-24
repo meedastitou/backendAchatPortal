@@ -9,6 +9,7 @@ Un BC est toujours pour UN seul fournisseur
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Optional
 from datetime import datetime
+import httpx
 
 from app.auth.dependencies import get_current_user
 from app.database import execute_query
@@ -28,9 +29,17 @@ from app.schemas.bon_commande import (
     BCListResponse,
     StatutBonCommande,
     ConvertOffreToRPARequest,
-    ConvertOffreToRPAResponse
+    ConvertOffreToRPAResponse,
+    # Caneva BC - Saisie Manuelle
+    LigneCanevaBCCreate,
+    GenerateCanevaBCRequest,
+    GenerateCanevaBCResponse,
+    # Envoi RPA
+    EnvoyerBCRPAResponse
 )
 import uuid
+
+from app.config import RPA_API_URL
 # import httpx  # Pour appeler le RPA
 
 
@@ -421,6 +430,139 @@ async def generer_bon_commande(
 
 
 # ──────────────────────────────────────────────────────────
+# Caneva BC - Saisie Manuelle
+# ──────────────────────────────────────────────────────────
+
+@router.post("/caneva", response_model=GenerateCanevaBCResponse)
+async def generer_caneva_bc(
+    request: GenerateCanevaBCRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Créer un bon de commande via saisie manuelle (Caneva BC).
+    L'utilisateur saisit manuellement les articles avec leurs prix et marques.
+    Un article peut être associé à plusieurs DA (une ligne sera créée pour chaque DA).
+    """
+
+    if not request.lignes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Aucune ligne saisie"
+        )
+
+    # Vérifier que le fournisseur existe
+    fournisseur = execute_query(
+        "SELECT * FROM fournisseurs WHERE code_fournisseur = %s",
+        (request.code_fournisseur,),
+        fetch_one=True
+    )
+    if not fournisseur:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Fournisseur non trouvé"
+        )
+
+    # Générer le numéro de BC
+    year = datetime.now().year
+    last_bc = execute_query(
+        "SELECT numero_bc FROM bons_commande WHERE numero_bc LIKE %s ORDER BY id DESC LIMIT 1",
+        (f"BC-{year}-%",),
+        fetch_one=True
+    )
+    if last_bc:
+        last_num = int(last_bc["numero_bc"].split("-")[-1])
+        new_num = last_num + 1
+    else:
+        new_num = 1
+
+    numero_bc = f"BC-{year}-{new_num:04d}"
+
+    # Calculer les totaux
+    # Chaque article sera dupliqué pour chaque DA, donc le total est (nb_da * prix)
+    montant_total_ht = 0.0
+    das_set = set()
+    nb_lignes_total = 0
+    tva_moyenne = 0.0
+
+    for ligne in request.lignes:
+        # Pour chaque DA associée à cet article
+        for numero_da in ligne.numeros_da:
+            montant_ligne_ht = ligne.quantite * ligne.prix_unitaire_ht
+            montant_total_ht += montant_ligne_ht
+            tva_moyenne += ligne.tva_pourcent
+            nb_lignes_total += 1
+            das_set.add(numero_da)
+
+    tva_moyenne = tva_moyenne / nb_lignes_total if nb_lignes_total > 0 else 20.0
+    montant_tva = montant_total_ht * (tva_moyenne / 100)
+    montant_total_ttc = montant_total_ht + montant_tva
+
+    das_incluses = list(das_set)
+
+    # Créer le bon de commande avec le flag saisie_manuelle
+    insert_bc = """
+        INSERT INTO bons_commande (
+            numero_bc, code_fournisseur,
+            date_creation, montant_total_ht, montant_tva, montant_total_ttc,
+            devise, statut, lieu_livraison, commentaire,
+            creee_par, saisie_manuelle
+        ) VALUES (%s, %s, NOW(), %s, %s, %s, 'MAD', 'brouillon', %s, %s, %s, TRUE)
+    """
+    execute_query(insert_bc, (
+        numero_bc,
+        request.code_fournisseur,
+        round(montant_total_ht, 2),
+        round(montant_tva, 2),
+        round(montant_total_ttc, 2),
+        request.lieu_livraison,
+        request.commentaire,
+        current_user.get("username")
+    ))
+
+    # Créer les lignes de BC (dupliquer pour chaque DA)
+    for ligne in request.lignes:
+        for numero_da in ligne.numeros_da:
+            montant_ligne_ht = ligne.quantite * ligne.prix_unitaire_ht
+            montant_ligne_ttc = montant_ligne_ht * (1 + ligne.tva_pourcent / 100)
+
+            insert_ligne = """
+                INSERT INTO lignes_bon_commande (
+                    numero_bc, ligne_source_id, reponse_id,
+                    numero_da, numero_rfq,
+                    code_article, marque, affaire, quantite,
+                    prix_unitaire_ht, montant_ligne_ht, tva_pourcent, montant_ligne_ttc,
+                    commentaire
+                ) VALUES (%s, NULL, NULL, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            execute_query(insert_ligne, (
+                numero_bc,
+                numero_da,
+                ligne.code_article,
+                ligne.marque,
+                ligne.affaire,
+                ligne.quantite,
+                ligne.prix_unitaire_ht,
+                round(montant_ligne_ht, 2),
+                ligne.tva_pourcent,
+                round(montant_ligne_ttc, 2),
+                ligne.commentaire
+            ))
+
+    return GenerateCanevaBCResponse(
+        success=True,
+        numero_bc=numero_bc,
+        message=f"Bon de commande {numero_bc} créé avec succès (saisie manuelle)",
+        montant_total_ht=round(montant_total_ht, 2),
+        montant_total_ttc=round(montant_total_ttc, 2),
+        code_fournisseur=request.code_fournisseur,
+        nom_fournisseur=fournisseur["nom_fournisseur"],
+        nb_lignes=nb_lignes_total,
+        nb_articles=len(request.lignes),
+        das_incluses=das_incluses
+    )
+
+
+# ──────────────────────────────────────────────────────────
 # Liste des Bons de Commande
 # ──────────────────────────────────────────────────────────
 
@@ -637,6 +779,122 @@ async def valider_bon_commande(
     )
 
     return await get_bon_commande(numero_bc, current_user)
+
+
+# ──────────────────────────────────────────────────────────
+# Envoyer BC au RPA (Sage X3)
+# ──────────────────────────────────────────────────────────
+
+@router.post("/{numero_bc}/envoyer-rpa", response_model=EnvoyerBCRPAResponse)
+async def envoyer_bc_rpa(
+    numero_bc: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Envoyer un bon de commande au RPA pour création dans Sage X3.
+    Fonctionne pour tous les BC (standards et Caneva/saisie manuelle).
+    """
+
+    # Récupérer le BC avec ses lignes
+    query = """
+        SELECT bc.*, f.nom_fournisseur, f.email as email_fournisseur, f.telephone as tel_fournisseur
+        FROM bons_commande bc
+        JOIN fournisseurs f ON bc.code_fournisseur = f.code_fournisseur
+        WHERE bc.numero_bc = %s
+    """
+    bc = execute_query(query, (numero_bc,), fetch_one=True)
+
+    if not bc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Bon de commande non trouvé"
+        )
+
+    # Récupérer les lignes du BC
+    lignes = execute_query(
+        "SELECT * FROM lignes_bon_commande WHERE numero_bc = %s ORDER BY id",
+        (numero_bc,)
+    )
+
+    if not lignes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Le BC n'a aucune ligne"
+        )
+
+    # Générer un ID unique pour cette requête RPA
+    rpa_request_id = f"RPA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:8].upper()}"
+
+    # Collecter les DA uniques
+    das_incluses = list(set(l["numero_da"] for l in lignes if l.get("numero_da")))
+
+    # Acheteur (utilisateur courant)
+    acheteur = current_user.get("username", "")
+
+    # Préparer le payload pour le RPA (format compatible avec selections.py)
+    # Chaque ligne du BC devient un objet dans le tableau
+    payload_rpa = [
+        {
+            "Numero_DA": l.get("numero_da") or "",
+            "Acheteur": acheteur,
+            "Code_Fournisseur": bc["code_fournisseur"],
+            "Email_Fournisseur": bc.get("email_fournisseur") or "",
+            "TEL_Fournisseur": bc.get("tel_fournisseur") or "",
+            "Code_Article": l["code_article"],
+            "Montant": float(l["montant_ligne_ht"]),
+            "Marque": l.get("marque") or "",
+            "Affaire": l.get("affaire") or ""
+        }
+        for l in lignes
+    ]
+    print(f"Payload RPA pour BC {numero_bc}:", payload_rpa)
+    # Log la requête RPA
+    try:
+        log_query = """
+            INSERT INTO logs_systeme (niveau, module, action, message, donnees_json, user_id, date_log)
+            VALUES ('info', 'bon_commande', 'rpa_bc_envoi', %s, %s, %s, NOW())
+        """
+        execute_query(log_query, (
+            f"Envoi BC {numero_bc} au RPA",
+            str(payload_rpa),
+            current_user.get("id")
+        ))
+    except Exception as e:
+        # Log error but continue
+        print(f"Warning: Could not log RPA request: {e}")
+
+    # Mettre à jour le statut du BC
+    # execute_query(
+    #     "UPDATE bons_commande SET statut = 'envoye' WHERE numero_bc = %s",
+    #     (numero_bc,)
+    # )
+    print(f"BC {numero_bc} statut mis à jour à 'envoye' (simulé)")
+    # TODO: Appeler le projet RPA ici
+    # Exemple d'appel futur:
+    email_acheteur = current_user.get("email", "")
+    rpa_payload = {
+        "donnees": payload_rpa,
+        "email_expediteur": email_acheteur,
+        "headless": True  # Mode headless en production
+    }
+    async with httpx.AsyncClient() as client:
+        rpa_response = await client.post(
+            RPA_API_URL,
+            json=rpa_payload,
+            headers={"Content-Type": "application/json"}
+        )
+
+    return EnvoyerBCRPAResponse(
+        success=True,
+        message=f"BC {numero_bc} envoyé au RPA avec succès",
+        rpa_request_id=rpa_request_id,
+        numero_bc=numero_bc,
+        code_fournisseur=bc["code_fournisseur"],
+        nom_fournisseur=bc["nom_fournisseur"],
+        nb_lignes=len(lignes),
+        montant_total_ht=float(bc["montant_total_ht"]),
+        payload_rpa=payload_rpa
+    )
 
 
 # ──────────────────────────────────────────────────────────

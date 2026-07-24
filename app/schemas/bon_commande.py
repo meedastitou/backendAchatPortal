@@ -355,3 +355,68 @@ class ConvertOffreToRPAResponse(BaseModel):
 
     # Données envoyées au RPA (pour debug/traçabilité)
     payload_rpa: Optional[dict] = None
+
+
+# ──────────────────────────────────────────────────────────
+# Caneva BC - Saisie Manuelle
+# ──────────────────────────────────────────────────────────
+
+class LigneCanevaBCCreate(BaseModel):
+    """Ligne pour création manuelle de BC (Caneva)"""
+    code_article: str
+    quantite: float
+    prix_unitaire_ht: float
+    marque: Optional[str] = None
+    affaire: Optional[str] = None
+    tva_pourcent: float = 20.0
+    # Liste des DA associées (une ligne sera créée pour chaque DA)
+    numeros_da: List[str]
+    commentaire: Optional[str] = None
+
+
+class GenerateCanevaBCRequest(BaseModel):
+    """Requête pour créer un BC via saisie manuelle (Caneva)"""
+    code_fournisseur: str
+    lignes: List[LigneCanevaBCCreate]
+
+    # Champs optionnels
+    lieu_livraison: Optional[str] = None
+    commentaire: Optional[str] = None
+
+
+class GenerateCanevaBCResponse(BaseModel):
+    """Réponse après création du BC via Caneva"""
+    success: bool
+    numero_bc: Optional[str] = None
+    message: str
+
+    montant_total_ht: Optional[float] = None
+    montant_total_ttc: Optional[float] = None
+
+    # Détails
+    code_fournisseur: Optional[str] = None
+    nom_fournisseur: Optional[str] = None
+    nb_lignes: Optional[int] = None
+    nb_articles: Optional[int] = None
+    das_incluses: Optional[List[str]] = None
+
+
+# ──────────────────────────────────────────────────────────
+# Envoi BC au RPA
+# ──────────────────────────────────────────────────────────
+
+class EnvoyerBCRPAResponse(BaseModel):
+    """Réponse après envoi du BC au RPA"""
+    success: bool
+    message: str
+    rpa_request_id: Optional[str] = None
+
+    # Infos BC
+    numero_bc: Optional[str] = None
+    code_fournisseur: Optional[str] = None
+    nom_fournisseur: Optional[str] = None
+    nb_lignes: Optional[int] = None
+    montant_total_ht: Optional[float] = None
+
+    # Payload envoyé au RPA (liste d'objets)
+    payload_rpa: Optional[List[dict]] = None
