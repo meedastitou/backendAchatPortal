@@ -450,18 +450,6 @@ async def generer_caneva_bc(
             detail="Aucune ligne saisie"
         )
 
-    # Vérifier que le fournisseur existe
-    fournisseur = execute_query(
-        "SELECT * FROM fournisseurs WHERE code_fournisseur = %s",
-        (request.code_fournisseur,),
-        fetch_one=True
-    )
-    if not fournisseur:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Fournisseur non trouvé"
-        )
-
     # Générer le numéro de BC
     year = datetime.now().year
     last_bc = execute_query(
@@ -555,7 +543,7 @@ async def generer_caneva_bc(
         montant_total_ht=round(montant_total_ht, 2),
         montant_total_ttc=round(montant_total_ttc, 2),
         code_fournisseur=request.code_fournisseur,
-        nom_fournisseur=fournisseur["nom_fournisseur"],
+        nom_fournisseur=None,
         nb_lignes=nb_lignes_total,
         nb_articles=len(request.lignes),
         das_incluses=das_incluses
