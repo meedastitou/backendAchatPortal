@@ -785,17 +785,17 @@ async def envoyer_bc_rpa(
 
     # Récupérer le BC avec ses lignes
     query = """
-        SELECT bc.*, f.nom_fournisseur, f.email as email_fournisseur, f.telephone as tel_fournisseur
+        SELECT bc.*
         FROM bons_commande bc
-        JOIN fournisseurs f ON bc.code_fournisseur = f.code_fournisseur
         WHERE bc.numero_bc = %s
     """
-    bc = execute_query(query, (numero_bc,), fetch_one=True)
+    bc = execute_query(query, (numero_bc.strip(),), fetch_one=True)
 
     if not bc:
+        # Debug: lister les BC existants
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Bon de commande non trouvé"
+            detail=f"Bon de commande '{numero_bc}' non trouvé"
         )
 
     # Récupérer les lignes du BC
@@ -826,8 +826,8 @@ async def envoyer_bc_rpa(
             "Numero_DA": l.get("numero_da") or "",
             "Acheteur": acheteur,
             "Code_Fournisseur": bc["code_fournisseur"],
-            "Email_Fournisseur": bc.get("email_fournisseur") or "",
-            "TEL_Fournisseur": bc.get("tel_fournisseur") or "",
+            "Email_Fournisseur": "",
+            "TEL_Fournisseur": "",
             "Code_Article": l["code_article"],
             "Montant": float(l["montant_ligne_ht"]),
             "Marque": l.get("marque") or "",
@@ -835,7 +835,6 @@ async def envoyer_bc_rpa(
         }
         for l in lignes
     ]
-    print(f"Payload RPA pour BC {numero_bc}:", payload_rpa)
     # Log la requête RPA
     try:
         log_query = """
@@ -856,7 +855,6 @@ async def envoyer_bc_rpa(
     #     "UPDATE bons_commande SET statut = 'envoye' WHERE numero_bc = %s",
     #     (numero_bc,)
     # )
-    print(f"BC {numero_bc} statut mis à jour à 'envoye' (simulé)")
     # TODO: Appeler le projet RPA ici
     # Exemple d'appel futur:
     email_acheteur = current_user.get("email", "")
@@ -878,7 +876,7 @@ async def envoyer_bc_rpa(
         rpa_request_id=rpa_request_id,
         numero_bc=numero_bc,
         code_fournisseur=bc["code_fournisseur"],
-        nom_fournisseur=bc["nom_fournisseur"],
+        nom_fournisseur="",
         nb_lignes=len(lignes),
         montant_total_ht=float(bc["montant_total_ht"]),
         payload_rpa=payload_rpa
