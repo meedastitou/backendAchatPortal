@@ -829,7 +829,7 @@ async def envoyer_bc_rpa(
             "Email_Fournisseur": "",
             "TEL_Fournisseur": "",
             "Code_Article": l["code_article"],
-            "Montant": float(l["montant_ligne_ht"]),
+            "Montant": float(l["prix_unitaire_ht"]),
             "Marque": l.get("marque") or "",
             "Affaire": l.get("affaire") or ""
         }
