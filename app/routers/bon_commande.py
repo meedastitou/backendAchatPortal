@@ -433,13 +433,13 @@ async def generer_bon_commande(
 # Caneva BC - Saisie Manuelle
 # ──────────────────────────────────────────────────────────
 
-@router.post("/caneva", response_model=GenerateCanevaBCResponse)
+@router.post("/caneva", response_model=EnvoyerBCRPAResponse)
 async def generer_caneva_bc(
     request: GenerateCanevaBCRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Créer un bon de commande via saisie manuelle (Caneva BC).
+    Envoyer les données du Caneva BC directement au RPA (sans enregistrer en base).
     L'utilisateur saisit manuellement les articles avec leurs prix et marques.
     Un article peut être associé à plusieurs DA (une ligne sera créée pour chaque DA).
     """
@@ -450,103 +450,60 @@ async def generer_caneva_bc(
             detail="Aucune ligne saisie"
         )
 
-    # Générer le numéro de BC
-    year = datetime.now().year
-    last_bc = execute_query(
-        "SELECT numero_bc FROM bons_commande WHERE numero_bc LIKE %s ORDER BY id DESC LIMIT 1",
-        (f"BC-{year}-%",),
-        fetch_one=True
-    )
-    if last_bc:
-        last_num = int(last_bc["numero_bc"].split("-")[-1])
-        new_num = last_num + 1
-    else:
-        new_num = 1
+    # Générer un ID unique pour cette requête RPA
+    rpa_request_id = f"RPA-{datetime.now().strftime('%Y%m%d%H%M%S')}-{str(uuid.uuid4())[:8].upper()}"
 
-    numero_bc = f"BC-{year}-{new_num:04d}"
+    # Acheteur (utilisateur courant)
+    acheteur = current_user.get("username", "")
 
-    # Calculer les totaux
-    # Chaque article sera dupliqué pour chaque DA, donc le total est (nb_da * prix)
+    # Construire le payload RPA (une ligne par DA)
+    payload_rpa = []
     montant_total_ht = 0.0
-    das_set = set()
     nb_lignes_total = 0
-    tva_moyenne = 0.0
 
     for ligne in request.lignes:
-        # Pour chaque DA associée à cet article
         for numero_da in ligne.numeros_da:
             montant_ligne_ht = ligne.quantite * ligne.prix_unitaire_ht
             montant_total_ht += montant_ligne_ht
-            tva_moyenne += ligne.tva_pourcent
             nb_lignes_total += 1
-            das_set.add(numero_da)
 
-    tva_moyenne = tva_moyenne / nb_lignes_total if nb_lignes_total > 0 else 20.0
-    montant_tva = montant_total_ht * (tva_moyenne / 100)
-    montant_total_ttc = montant_total_ht + montant_tva
+            payload_rpa.append({
+                "Numero_DA": numero_da,
+                "Acheteur": acheteur,
+                "Code_Fournisseur": request.code_fournisseur,
+                "Email_Fournisseur": "",
+                "TEL_Fournisseur": "",
+                "Code_Article": ligne.code_article,
+                "Montant": ligne.prix_unitaire_ht,
+                "Marque": ligne.marque or "",
+                "Affaire": ligne.affaire or ""
+            })
 
-    das_incluses = list(das_set)
+    # Envoyer au RPA
+    email_acheteur = current_user.get("email", "")
+    rpa_payload = {
+        "donnees": payload_rpa,
+        "email_expediteur": email_acheteur,
+        "headless": True
+    }
 
-    # Créer le bon de commande avec le flag saisie_manuelle
-    insert_bc = """
-        INSERT INTO bons_commande (
-            numero_bc, code_fournisseur,
-            date_creation, montant_total_ht, montant_tva, montant_total_ttc,
-            devise, statut, lieu_livraison, commentaire,
-            creee_par, saisie_manuelle
-        ) VALUES (%s, %s, NOW(), %s, %s, %s, 'MAD', 'brouillon', %s, %s, %s, TRUE)
-    """
-    execute_query(insert_bc, (
-        numero_bc,
-        request.code_fournisseur,
-        round(montant_total_ht, 2),
-        round(montant_tva, 2),
-        round(montant_total_ttc, 2),
-        request.lieu_livraison,
-        request.commentaire,
-        current_user.get("username")
-    ))
+    async with httpx.AsyncClient() as client:
+        rpa_response = await client.post(
+            RPA_API_URL,
+            json=rpa_payload,
+            headers={"Content-Type": "application/json"}
+        )
 
-    # Créer les lignes de BC (dupliquer pour chaque DA)
-    for ligne in request.lignes:
-        for numero_da in ligne.numeros_da:
-            montant_ligne_ht = ligne.quantite * ligne.prix_unitaire_ht
-            montant_ligne_ttc = montant_ligne_ht * (1 + ligne.tva_pourcent / 100)
-
-            insert_ligne = """
-                INSERT INTO lignes_bon_commande (
-                    numero_bc, ligne_source_id, reponse_id,
-                    numero_da, numero_rfq,
-                    code_article, marque, affaire, quantite,
-                    prix_unitaire_ht, montant_ligne_ht, tva_pourcent, montant_ligne_ttc,
-                    commentaire
-                ) VALUES (%s, NULL, NULL, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            execute_query(insert_ligne, (
-                numero_bc,
-                numero_da,
-                ligne.code_article,
-                ligne.marque,
-                ligne.affaire,
-                ligne.quantite,
-                ligne.prix_unitaire_ht,
-                round(montant_ligne_ht, 2),
-                ligne.tva_pourcent,
-                round(montant_ligne_ttc, 2),
-                ligne.commentaire
-            ))
-
-    return GenerateCanevaBCResponse(
+    return EnvoyerBCRPAResponse(
         success=True,
-        numero_bc=numero_bc,
-        message=f"Bon de commande {numero_bc} créé avec succès (saisie manuelle)",
-        montant_total_ht=round(montant_total_ht, 2),
-        montant_total_ttc=round(montant_total_ttc, 2),
+        message=f"Données envoyées au RPA avec succès ({nb_lignes_total} lignes)",
+        rpa_request_id=rpa_request_id,
+        numero_bc=None,
         code_fournisseur=request.code_fournisseur,
         nom_fournisseur=None,
         nb_lignes=nb_lignes_total,
-        nb_articles=len(request.lignes),
-        das_incluses=das_incluses
+        montant_total_ht=round(montant_total_ht, 2),
+        payload_rpa=payload_rpa
     )
 
 
