@@ -102,6 +102,8 @@ class RFQResponse(BaseModel):
     date_envoi: datetime
     date_limite_reponse: Optional[datetime] = None
     statut: StatutRFQ
+    manuel: bool
+    created_by: Optional[str] = None
     nb_relances: int
     date_derniere_relance: Optional[datetime] = None
     date_ouverture_email: Optional[datetime] = None
@@ -140,3 +142,92 @@ class RFQFilters(BaseModel):
     search: Optional[str] = None
     page: int = 1
     limit: int = 20
+
+
+# ──────────────────────────────────────────────────────────
+# Création manuelle de RFQ
+# ──────────────────────────────────────────────────────────
+
+class FournisseurSelectionResponse(BaseModel):
+    """Fournisseur pour sélection dans création RFQ"""
+    code_fournisseur: str
+    nom_fournisseur: str
+    email: Optional[str] = None
+    blacklist: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class FournisseurSearchResponse(BaseModel):
+    fournisseurs: List[FournisseurSelectionResponse]
+    total: int
+
+
+class DADisponibleResponse(BaseModel):
+    """DA disponible pour création RFQ"""
+    numero_da: str
+    nb_articles: int
+
+
+class DAListResponse(BaseModel):
+    da_list: List[DADisponibleResponse]
+    total: int
+
+
+class ArticleDAResponse(BaseModel):
+    """Article d'une DA pour création RFQ"""
+    id: int
+    numero_da: str
+    code_article: str
+    designation_article: Optional[str] = None
+    quantite: float
+    unite: Optional[str] = None
+    marque_souhaitee: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ArticlesDAListResponse(BaseModel):
+    numero_da: str
+    articles: List[ArticleDAResponse]
+    total: int
+
+
+class ArticleSelectionCreate(BaseModel):
+    """Article sélectionné pour création RFQ"""
+    numero_da: str
+    code_article: str
+    designation_article: Optional[str] = None
+    quantite: float
+    unite: Optional[str] = None
+    marque_souhaitee: Optional[str] = None
+
+
+class CreerRFQManuelRequest(BaseModel):
+    """Requête de création manuelle de RFQ"""
+    fournisseurs: List[str]  # codes fournisseurs
+    articles: List[ArticleSelectionCreate]
+    date_limite_reponse: Optional[datetime] = None
+
+
+class RFQCreatedResponse(BaseModel):
+    """Réponse après création d'une RFQ"""
+    uuid: str
+    numero_rfq: str
+    code_fournisseur: str
+    nom_fournisseur: Optional[str] = None
+    email: Optional[str] = None
+    nb_articles: int
+    email_envoye: bool = False
+    email_error: Optional[str] = None
+
+
+class CreerRFQManuelResponse(BaseModel):
+    """Réponse de création manuelle de RFQ"""
+    success: bool
+    message: str
+    rfqs_crees: List[RFQCreatedResponse]
+    nb_rfqs: int
+    nb_emails_envoyes: int
