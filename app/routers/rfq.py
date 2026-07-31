@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime, date
 from io import BytesIO
-
+import requests
 from app.auth.dependencies import get_current_user, get_user_famille_filter
 from app.database import execute_query, execute_insert
 from app.schemas.rfq import (
@@ -30,7 +30,7 @@ from app.schemas.rfq import (
     RFQCreatedResponse
 )
 import uuid as uuid_lib
-
+from app.config import settings
 
 router = APIRouter(prefix="/rfq", tags=["Demandes de Cotation"])
 
@@ -877,7 +877,7 @@ async def creer_rfq_manuel(
             """
             INSERT INTO demandes_cotation
             (uuid, numero_rfq, code_fournisseur, date_envoi, date_limite_reponse, statut, nb_relances, manuel, created_by)
-            VALUES (%s, %s, %s, %s, %s, 'envoye', 0, 0, %s)
+            VALUES (%s, %s, %s, %s, %s, 'envoye', 0, 1, %s)
             """,
             (
                 rfq_uuid,
@@ -908,9 +908,16 @@ async def creer_rfq_manuel(
                 )
             )
 
-        # TODO: Envoi d'email via API externe (sera configuré plus tard)
         email_envoye = False
         email_error = None
+        response = requests.post(
+            url=settings.N8N_endpoint_URL_ACH4,
+            json={'rfq_uuid':rfq_uuid, 'email_acheteur': current_user["email"]}
+            # headers=default_headers,
+            # timeout=self.timeout
+        )   
+        if(response.status_code == 200):
+            email_envoye=True
 
         rfqs_crees.append(RFQCreatedResponse(
             uuid=rfq_uuid,

@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     X3_DB_PASSWORD: str = ""
     X3_DB_DRIVER: str = "ODBC Driver 17 for SQL Server"
 
+    N8N_endpoint_URL_ACH4: str = ""
+
     @property
     def X3_CONNECTION_STRING(self) -> str:
         """Connection string ODBC pour SQL Server (Sage X3) - supporte les instances nommées"""
@@ -86,3 +88,4 @@ settings = get_settings()
 
 # Export direct pour faciliter l'import
 RPA_API_URL = settings.RPA_API_URL
+
