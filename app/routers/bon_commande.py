@@ -449,9 +449,9 @@ async def get_da_disponibles(
         LEFT JOIN BASE1.PREQUIS DA ON DA.PSHNUM_0 = DNS.DA
         INNER JOIN BASE1.PREQUISD DAD ON DAD.PSHNUM_0 = DA.PSHNUM_0 AND DAD.ITMREF_0 = DNS.Article
         WHERE DNS.Famille NOT LIKE 'SERVICE%'
-            AND DNS.Famille NOT LIKE 'LOGISTIQUE%'
-            AND DNS.Famille NOT LIKE 'R.H'
-            AND DNS.Article NOT IN ('A09985', 'A10107', 'A10136')
+            -- AND DNS.Famille NOT LIKE 'LOGISTIQUE%'
+            -- AND DNS.Famille NOT LIKE 'R.H'
+            -- AND DNS.Article NOT IN ('A09985', 'A10107', 'A10136')
             AND DA.CLEFLG_0 = 1
         ORDER BY DNS.DA
     """
@@ -484,10 +484,10 @@ async def get_articles_da(
         LEFT JOIN BASE1.PREQUIS DA ON DA.PSHNUM_0 = DNS.DA
         INNER JOIN BASE1.PREQUISD DAD ON DAD.PSHNUM_0 = DA.PSHNUM_0 AND DAD.ITMREF_0 = DNS.Article
         WHERE DNS.DA = :numero_da
-            AND DNS.Famille NOT LIKE 'SERVICE%'
-            AND DNS.Famille NOT LIKE 'LOGISTIQUE%'
-            AND DNS.Famille NOT LIKE 'R.H'
-            AND DNS.Article NOT IN ('A09985', 'A10107', 'A10136')
+            -- AND DNS.Famille NOT LIKE 'SERVICE%'
+            -- AND DNS.Famille NOT LIKE 'LOGISTIQUE%'
+            -- AND DNS.Famille NOT LIKE 'R.H'
+            -- AND DNS.Article NOT IN ('A09985', 'A10107', 'A10136')
             AND DA.CLEFLG_0 = 1
     """
     rows = execute_x3_query(query, {"numero_da": numero_da})
