@@ -1,0 +1,9 @@
+{'donnees': [
+        {'Numero_DA': 'DA170259', 'Acheteur': 'admin', 'Code_Fournisseur': 'T1695', 'Email_Fournisseur': "'latifaERRAIDY'<com06@fiabel.ma>", 'TEL_Fournisseu': '522403303', 'Code_Article': 'A05008', 'Montant': 168.0, 'Marque': '', 'Affaire': ''
+        },
+        {'Numero_DA': 'DA171067', 'Acheteur': 'admin', 'Code_Fournisseur': 'T1695', 'Email_Fournisseur': "'latifaERRAIDY'<com06@fiabel.ma>", 'TEL_Fournisseu': '522403303', 'Code_Article': 'A05199', 'Montant': 185.0, 'Marque': '', 'Affaire': ''
+        },
+        {'Numero_DA': 'DA170913', 'Acheteur': 'admin', 'Code_Fournisseur': 'T1695', 'Email_Fournisseur': "'latifaERRAIDY'<com06@fiabel.ma>", 'TEL_Fournisseu': '522403303', 'Code_Article': 'A05296', 'Montant': 156.0, 'Marque': '', 'Affaire': ''
+        }
+    ], 'email_expediteur': 'admin@votresociete.com', 'headless': True
+}
