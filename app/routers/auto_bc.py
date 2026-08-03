@@ -280,13 +280,23 @@ def get_tarifs_articles_x3(codes_articles: List[str]) -> Dict[str, float]:
         params = {f"art_{i}": code for i, code in enumerate(codes_articles)}
 
         query = f"""
-            SELECT
-                ITMMASTER.ITMREF_0 AS code_article,
-                PPRICLIST.PRI_0 AS tarif
-            FROM BASE1.PPRICLIST PPRICLIST
-            INNER JOIN BASE1.ITMMASTER ITMMASTER
-                ON PPRICLIST.PLICRI1_0 = ITMMASTER.ITMREF_0
-            WHERE ITMMASTER.ITMREF_0 IN ({placeholders})
+            WITH CTE AS (
+                SELECT 
+                    PPRICLIST.PLICRI1_0 AS code_article,
+                    PPRICLIST.PRI_0 AS tarif,
+                    PPRICLIST.PLIENDDAT_0 AS date_fin,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY PPRICLIST.PLICRI1_0
+                        ORDER BY PPRICLIST.PLIENDDAT_0 DESC, PPRICLIST.PRI_0 DESC
+                    ) AS rang
+                FROM BASE1.PPRICLIST PPRICLIST
+                --INNER JOIN BASE1.ITMMASTER ITMMASTER
+                --  ON PPRICLIST.PLICRI1_0 = ITMMASTER.ITMREF_0
+                WHERE PPRICLIST.PLICRI1_0 IN ({placeholders})
+            )
+            SELECT code_article, tarif
+            FROM CTE
+            WHERE rang = 1;
         """
 
         rows = execute_x3_query(query, params)
@@ -362,8 +372,8 @@ def normaliser_marque(marque: str) -> str:
 
 def verifier_marque_xmarqa(code_article: str, marque: str) -> bool:
     """
-    Vérifier si une marque existe dans la table XMARQA de Sage X3.
-    Table: BASE1.XMARQA (Marques autorisées par article)
+    Vérifier si une marque existe dans la table XMRQART de Sage X3.
+    Table: BASE1.XMRQART (Marques autorisées par article)
 
     Comparaison normalisée: sans espaces et en minuscules.
 
@@ -378,10 +388,10 @@ def verifier_marque_xmarqa(code_article: str, marque: str) -> bool:
     try:
         # Récupérer toutes les marques de l'article
         query = """
-            SELECT XMARQ_0 AS marque_article
-            FROM BASE1.XMARQA
-            WHERE ITMREF_0 = :code_article
-              AND XMARQ_0 IS NOT NULL
+            SELECT XMARQ_0 as marque_article
+            FROM BASE1.XMRQART
+            WHERE XART_0 = :code_article
+            AND XMARQ_0 IS NOT NULL
         """
         rows = execute_x3_query(query, {"code_article": code_article})
 
@@ -519,7 +529,7 @@ def get_marques_defaut_batch(offres: List[dict]) -> Dict[str, Dict[str, str]]:
                         WHEN PRD.XMARQ_0 IS NOT NULL AND PRD.XMARQ_0 <> '' AND PRD.XMARQ_0 <> 'ND' THEN 'DA'
                         WHEN PRQ.XMARQ_0 IS NOT NULL AND PRQ.XMARQ_0 <> '' AND PRQ.XMARQ_0 <> 'ND' THEN 'BC'
                         WHEN PRPD.XMARQ_0 IS NOT NULL AND PRPD.XMARQ_0 <> '' AND PRPD.XMARQ_0 <> 'ND' THEN 'BR'
-                        WHEN X.XMARQ_0 IS NOT NULL AND X.XMARQ_0 <> '' AND X.XMARQ_0 <> 'ND' THEN 'Table Article (XMARQA)'
+                        WHEN X.XMARQ_0 IS NOT NULL AND X.XMARQ_0 <> '' AND X.XMARQ_0 <> 'ND' THEN 'Table Article (XMRQART)'
                         ELSE 'Aucune (Par défaut)'
                     END AS Origine_Marque,
                     PRD.XMARQ_0 AS Marque_DA,
@@ -544,10 +554,10 @@ def get_marques_defaut_batch(offres: List[dict]) -> Dict[str, Dict[str, str]]:
                 ) PRPD ON PRPD.ITMREF_0 = PRD.ITMREF_0
 
                 LEFT JOIN (
-                    SELECT TOP 1 ITMREF_0, XMARQ_0
-                    FROM BASE1.XMARQA
-                    WHERE ITMREF_0 = :code_article
-                ) X ON X.ITMREF_0 = PRD.ITMREF_0
+                    SELECT TOP 1 XART_0, XMARQ_0
+                    FROM BASE1.XMRQART
+                    WHERE XART_0 = :code_article
+                ) X ON X.XART_0 = PRD.ITMREF_0
 
                 WHERE PRD.PSHNUM_0 = :numero_da
                   AND PRD.ITMREF_0 = :code_article
