@@ -13,6 +13,7 @@ import httpx
 
 from app.auth.dependencies import get_current_user
 from app.database import execute_query
+from app.sqlserver_db import execute_x3_query
 from app.schemas.bon_commande import (
     DADisponible,
     FournisseurDisponibleBC,
@@ -430,7 +431,129 @@ async def generer_bon_commande(
 
 
 # ──────────────────────────────────────────────────────────
-# Caneva BC - Saisie Manuelle
+# Caneva BC - Endpoints pour sélection DA/Articles depuis X3
+# ──────────────────────────────────────────────────────────
+
+@router.get("/caneva/da-disponibles")
+async def get_da_disponibles(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Liste des DA non soldées depuis Sage X3.
+    Retourne la liste des numéros de DA uniques disponibles.
+    """
+    query = """
+        SELECT DISTINCT
+            DNS.DA as numero_da
+        FROM BASE1.Y_DA_NON_SOLDEES DNS
+        LEFT JOIN BASE1.PREQUIS DA ON DA.PSHNUM_0 = DNS.DA
+        INNER JOIN BASE1.PREQUISD DAD ON DAD.PSHNUM_0 = DA.PSHNUM_0 AND DAD.ITMREF_0 = DNS.Article
+        WHERE DNS.Famille NOT LIKE 'SERVICE%'
+            -- AND DNS.Famille NOT LIKE 'LOGISTIQUE%'
+            -- AND DNS.Famille NOT LIKE 'R.H'
+            -- AND DNS.Article NOT IN ('A09985', 'A10107', 'A10136')
+            AND DA.CLEFLG_0 = 1
+        ORDER BY DNS.DA
+    """
+    rows = execute_x3_query(query, {})
+
+    return {
+        "da_list": [row["numero_da"] for row in rows] if rows else [],
+        "total": len(rows) if rows else 0
+    }
+
+
+@router.get("/caneva/da/{numero_da}/articles")
+async def get_articles_da(
+    numero_da: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Liste des articles d'une DA depuis Sage X3.
+    """
+    query = """
+        SELECT
+            DNS.DA as numero_da,
+            DNS.Article as code_article,
+            DNS.DésignationArticle as designation_article,
+            DNS.QteDA as quantite,
+            DAD.XMARQ_0 as marque,
+            DNS.STU_0 AS unite,
+            DNS.Famille as famille
+        FROM BASE1.Y_DA_NON_SOLDEES DNS
+        LEFT JOIN BASE1.PREQUIS DA ON DA.PSHNUM_0 = DNS.DA
+        INNER JOIN BASE1.PREQUISD DAD ON DAD.PSHNUM_0 = DA.PSHNUM_0 AND DAD.ITMREF_0 = DNS.Article
+        WHERE DNS.DA = :numero_da
+            -- AND DNS.Famille NOT LIKE 'SERVICE%'
+            -- AND DNS.Famille NOT LIKE 'LOGISTIQUE%'
+            -- AND DNS.Famille NOT LIKE 'R.H'
+            -- AND DNS.Article NOT IN ('A09985', 'A10107', 'A10136')
+            AND DA.CLEFLG_0 = 1
+    """
+    rows = execute_x3_query(query, {"numero_da": numero_da})
+
+    return {
+        "numero_da": numero_da,
+        "articles": rows if rows else [],
+        "total": len(rows) if rows else 0
+    }
+
+
+@router.get("/caneva/article/{code_article}/tarif-max")
+async def get_tarif_max(
+    code_article: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Récupérer le tarif maximum pour un article depuis Sage X3.
+    """
+    query = """
+        SELECT TOP 1
+            ITMMASTER.ITMREF_0 AS code_article,
+            PPRICLIST.PRI_0 AS tarif_max
+        FROM BASE1.PPRICLIST PPRICLIST
+        INNER JOIN BASE1.ITMMASTER ITMMASTER
+            ON PPRICLIST.PLICRI1_0 = ITMMASTER.ITMREF_0
+        WHERE ITMMASTER.ITMREF_0 = :code_article
+        ORDER BY PPRICLIST.PLIENDDAT_0 DESC, PPRICLIST.PRI_0 DESC
+    """
+    row = execute_x3_query(query, {"code_article": code_article}, fetch_one=True)
+
+    if row:
+        return {
+            "code_article": code_article,
+            "tarif_max": float(row["tarif_max"]) if row["tarif_max"] else None
+        }
+    return {
+        "code_article": code_article,
+        "tarif_max": None
+    }
+
+
+@router.get("/caneva/article/{code_article}/marques")
+async def get_marques_article(
+    code_article: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Liste des marques disponibles pour un article depuis Sage X3.
+    """
+    query = """
+        SELECT XART_0 as code_article, XMARQ_0 as marque
+        FROM BASE1.XMRQART
+        WHERE XART_0 = :code_article
+    """
+    rows = execute_x3_query(query, {"code_article": code_article})
+
+    return {
+        "code_article": code_article,
+        "marques": [row["marque"] for row in rows] if rows else [],
+        "total": len(rows) if rows else 0
+    }
+
+
+# ──────────────────────────────────────────────────────────
+# Caneva BC - Envoi au RPA
 # ──────────────────────────────────────────────────────────
 
 @router.post("/caneva", response_model=EnvoyerBCRPAResponse)

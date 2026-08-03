@@ -1,6 +1,6 @@
 """Modèle Demande de Cotation (RFQ)"""
 
-from sqlalchemy import Column, Integer, String, Enum, DateTime
+from sqlalchemy import Column, Integer, String, Enum, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -20,6 +20,8 @@ class DemandeCotation(Base):
         nullable=False,
         default='envoye'
     )
+    manuel = Column(Boolean, default=False)
+    created_by = Column(String(250), nullable=True)
     nb_relances = Column(Integer, default=0)
     date_derniere_relance = Column(DateTime)
     date_ouverture_email = Column(DateTime)

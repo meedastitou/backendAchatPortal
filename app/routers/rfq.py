@@ -9,17 +9,28 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime, date
 from io import BytesIO
-
+import requests
 from app.auth.dependencies import get_current_user, get_user_famille_filter
-from app.database import execute_query
+from app.database import execute_query, execute_insert
 from app.schemas.rfq import (
     RFQResponse,
     RFQDetailResponse,
     RFQListResponse,
     LigneCotationResponse,
-    StatutRFQ
+    StatutRFQ,
+    # Création manuelle
+    FournisseurSelectionResponse,
+    FournisseurSearchResponse,
+    DADisponibleResponse,
+    DAListResponse,
+    ArticleDAResponse,
+    ArticlesDAListResponse,
+    CreerRFQManuelRequest,
+    CreerRFQManuelResponse,
+    RFQCreatedResponse
 )
-
+import uuid as uuid_lib
+from app.config import settings
 
 router = APIRouter(prefix="/rfq", tags=["Demandes de Cotation"])
 
@@ -659,4 +670,273 @@ async def export_rfq_filtered(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# CRÉATION MANUELLE DE RFQ
+# ══════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────
+# Recherche de fournisseurs
+# ──────────────────────────────────────────────────────────
+
+@router.get("/creation/fournisseurs", response_model=FournisseurSearchResponse)
+async def search_fournisseurs_for_rfq(
+    q: str = Query("", description="Recherche par code ou nom"),
+    limit: int = Query(20, ge=1, le=100),
+    current_user: dict = Depends(get_current_user)
+):
+    """Rechercher des fournisseurs pour la création de RFQ"""
+
+    conditions = ["blacklist = FALSE"]
+    params = []
+
+    if q:
+        conditions.append("(code_fournisseur LIKE %s OR nom_fournisseur LIKE %s)")
+        search_pattern = f"%{q}%"
+        params.extend([search_pattern, search_pattern])
+
+    where_clause = " AND ".join(conditions)
+
+    # Count
+    count_query = f"SELECT COUNT(*) as total FROM fournisseurs WHERE {where_clause}"
+    total = execute_query(count_query, tuple(params) if params else None, fetch_one=True)["total"]
+
+    # Get fournisseurs
+    query = f"""
+        SELECT code_fournisseur, nom_fournisseur, email, blacklist
+        FROM fournisseurs
+        WHERE {where_clause}
+        ORDER BY nom_fournisseur ASC
+        LIMIT %s
+    """
+    params.append(limit)
+    fournisseurs = execute_query(query, tuple(params))
+
+    return FournisseurSearchResponse(
+        fournisseurs=[FournisseurSelectionResponse(**f) for f in fournisseurs],
+        total=total
+    )
+
+
+# ──────────────────────────────────────────────────────────
+# DA disponibles (depuis demandes_achat MySQL)
+# ──────────────────────────────────────────────────────────
+
+@router.get("/creation/da-disponibles", response_model=DAListResponse)
+async def get_da_disponibles_for_rfq(
+    search: str = Query("", description="Recherche par numéro DA"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Lister les DA disponibles depuis demandes_achat (MySQL)"""
+
+    conditions = ["statut IN ('nouveau', 'en_cours')"]
+    params = []
+
+    if search:
+        conditions.append("numero_da LIKE %s")
+        params.append(f"%{search}%")
+
+    where_clause = " AND ".join(conditions)
+
+    query = f"""
+        SELECT numero_da, COUNT(*) as nb_articles
+        FROM demandes_achat
+        WHERE {where_clause}
+        GROUP BY numero_da
+        ORDER BY numero_da DESC
+    """
+
+    das = execute_query(query, tuple(params) if params else None)
+
+    return DAListResponse(
+        da_list=[DADisponibleResponse(**da) for da in das],
+        total=len(das)
+    )
+
+
+# ──────────────────────────────────────────────────────────
+# Articles d'une DA
+# ──────────────────────────────────────────────────────────
+
+@router.get("/creation/da/{numero_da}/articles", response_model=ArticlesDAListResponse)
+async def get_articles_da_for_rfq(
+    numero_da: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Récupérer les articles d'une DA depuis demandes_achat (MySQL)"""
+
+    query = """
+        SELECT id, numero_da, code_article, designation_article,
+               quantite, unite, marque_souhaitee
+        FROM demandes_achat
+        WHERE numero_da = %s
+        ORDER BY code_article
+    """
+
+    articles = execute_query(query, (numero_da,))
+
+    if not articles:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Aucun article trouvé pour la DA {numero_da}"
+        )
+
+    return ArticlesDAListResponse(
+        numero_da=numero_da,
+        articles=[ArticleDAResponse(**a) for a in articles],
+        total=len(articles)
+    )
+
+
+# ──────────────────────────────────────────────────────────
+# Créer des RFQ manuellement
+# ──────────────────────────────────────────────────────────
+
+@router.post("/creation/creer", response_model=CreerRFQManuelResponse)
+async def creer_rfq_manuel(
+    request: CreerRFQManuelRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Créer manuellement des RFQ (une par fournisseur sélectionné).
+    Tous les fournisseurs reçoivent les mêmes articles.
+    """
+
+    if not request.fournisseurs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Au moins un fournisseur doit être sélectionné"
+        )
+
+    if not request.articles:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Au moins un article doit être sélectionné"
+        )
+
+    # Vérifier que les fournisseurs existent et ne sont pas blacklistés
+    fournisseurs_codes = request.fournisseurs
+    placeholders = ", ".join(["%s"] * len(fournisseurs_codes))
+    fournisseurs_db = execute_query(
+        f"""
+        SELECT code_fournisseur, nom_fournisseur, email, blacklist
+        FROM fournisseurs
+        WHERE code_fournisseur IN ({placeholders})
+        """,
+        tuple(fournisseurs_codes)
+    )
+
+    fournisseurs_map = {f["code_fournisseur"]: f for f in fournisseurs_db}
+
+    # Vérifier que tous existent
+    for code in fournisseurs_codes:
+        if code not in fournisseurs_map:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Fournisseur {code} non trouvé"
+            )
+        if fournisseurs_map[code]["blacklist"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Fournisseur {code} est blacklisté"
+            )
+
+    # Générer le préfixe du numéro RFQ
+    today = datetime.now()
+    prefix = f"RFQ-{today.strftime('%Y%m%d')}"
+
+    # Récupérer le dernier numéro RFQ du jour
+    last_rfq = execute_query(
+        "SELECT numero_rfq FROM demandes_cotation WHERE numero_rfq LIKE %s ORDER BY numero_rfq DESC LIMIT 1",
+        (f"{prefix}%",),
+        fetch_one=True
+    )
+
+    if last_rfq:
+        # Extraire le compteur
+        try:
+            last_num = int(last_rfq["numero_rfq"].split("-")[-1])
+        except (ValueError, IndexError):
+            last_num = 0
+    else:
+        last_num = 0
+
+    rfqs_crees = []
+    nb_emails_envoyes = 0
+
+    # Créer une RFQ par fournisseur
+    for i, code_fournisseur in enumerate(fournisseurs_codes):
+        fournisseur = fournisseurs_map[code_fournisseur]
+        rfq_uuid = str(uuid_lib.uuid4())
+        numero_rfq = f"{prefix}-{str(last_num + i + 1).zfill(4)}"
+
+        # Insérer la demande de cotation
+        execute_insert(
+            """
+            INSERT INTO demandes_cotation
+            (uuid, numero_rfq, code_fournisseur, date_envoi, date_limite_reponse, statut, nb_relances, manuel, created_by)
+            VALUES (%s, %s, %s, %s, %s, 'envoye', 0, 1, %s)
+            """,
+            (
+                rfq_uuid,
+                numero_rfq,
+                code_fournisseur,
+                today,
+                request.date_limite_reponse,
+                current_user["username"]
+            )
+        )
+
+        # Insérer les lignes de cotation
+        for article in request.articles:
+            execute_insert(
+                """
+                INSERT INTO lignes_cotation
+                (rfq_uuid, numero_da, code_article, designation_article, quantite_demandee, unite, marque_souhaitee)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    rfq_uuid,
+                    article.numero_da,
+                    article.code_article,
+                    article.designation_article,
+                    article.quantite,
+                    article.unite,
+                    article.marque_souhaitee
+                )
+            )
+
+        email_envoye = False
+        email_error = None
+        response = requests.post(
+            url=settings.N8N_endpoint_URL_ACH4,
+            json={'rfq_uuid':rfq_uuid, 'email_acheteur': current_user["email"]}
+            # headers=default_headers,
+            # timeout=self.timeout
+        )   
+        if(response.status_code == 200):
+            email_envoye=True
+
+        rfqs_crees.append(RFQCreatedResponse(
+            uuid=rfq_uuid,
+            numero_rfq=numero_rfq,
+            code_fournisseur=code_fournisseur,
+            nom_fournisseur=fournisseur["nom_fournisseur"],
+            email=fournisseur["email"],
+            nb_articles=len(request.articles),
+            email_envoye=email_envoye,
+            email_error=email_error
+        ))
+
+        if email_envoye:
+            nb_emails_envoyes += 1
+
+    return CreerRFQManuelResponse(
+        success=True,
+        message=f"{len(rfqs_crees)} RFQ créées avec succès",
+        rfqs_crees=rfqs_crees,
+        nb_rfqs=len(rfqs_crees),
+        nb_emails_envoyes=nb_emails_envoyes
     )

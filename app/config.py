@@ -29,11 +29,11 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # Base de données MySQL
-    DB_HOST: str = "192.168.1.211"
+    DB_HOST: str = "localhost"
     DB_PORT: int = 3306
     DB_NAME: str = "flux_achat_portal"
     DB_USER: str = "root"
-    DB_PASSWORD: str = "root123"
+    DB_PASSWORD: str = ""
 
     # JWT Authentication
     SECRET_KEY: str = "jbel@JBEL@*ANNOUR2026"
@@ -47,11 +47,14 @@ class Settings(BaseSettings):
     RPA_API_URL: str = "http://localhost:8001/api/bonne-commande/data"
 
     # SQL Server (Sage X3)
-    X3_DB_HOST: str = "192.168.1.241\\ERPX3"
+    X3_DB_HOST: str = "localhost"
+    X3_DB_PORT: int = 1433
     X3_DB_NAME: str = "x3"
-    X3_DB_USER: str = "X3U"
-    X3_DB_PASSWORD: str = "SQL@2019"
+    X3_DB_USER: str = ""
+    X3_DB_PASSWORD: str = ""
     X3_DB_DRIVER: str = "ODBC Driver 17 for SQL Server"
+
+    N8N_endpoint_URL_ACH4: str = ""
 
     @property
     def X3_CONNECTION_STRING(self) -> str:
@@ -85,3 +88,4 @@ settings = get_settings()
 
 # Export direct pour faciliter l'import
 RPA_API_URL = settings.RPA_API_URL
+
