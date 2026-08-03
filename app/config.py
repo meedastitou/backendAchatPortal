@@ -64,7 +64,7 @@ class Settings(BaseSettings):
             f"DRIVER={{{self.X3_DB_DRIVER}}};"
             f"SERVER={server};"
             f"DATABASE={self.X3_DB_NAME};"
-            f"UID={self.X3_DB_USER};"
+            f"UID={self.X3_DB_USER};"  
             f"PWD={self.X3_DB_PASSWORD};"
             f"TrustServerCertificate=yes;"
         )
