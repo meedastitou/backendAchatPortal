@@ -40,7 +40,7 @@ class DATransfertRequest(BaseModel):
     designation_article: Optional[str] = None
     quantite: float
     unite: Optional[str] = None
-    marque_souhaitee: Optional[str] = None
+    marque_souhaitee: Optional[str] = None 
     priorite: Priorite = Priorite.normale
 
 # ──────────────────────────────────────────────────────────

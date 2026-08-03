@@ -186,7 +186,7 @@ def get_x3_cursor():
     finally:
         cursor.close()
         conn.close()
-
+ 
 
 def _rows_to_dicts(cursor) -> list[dict]:
     """Convertir les résultats pyodbc (tuples) en liste de dicts, comme mysql.connector"""

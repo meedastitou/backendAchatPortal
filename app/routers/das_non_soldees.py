@@ -117,7 +117,7 @@ async def transferer_da(
         payload.marque_souhaitee,
         payload.priorite.value,
         StatutDA.nouveau.value
-    ))
+    )) 
 
     created = execute_query(
         "SELECT * FROM demandes_achat WHERE id = %s",
