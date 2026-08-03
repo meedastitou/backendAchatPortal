@@ -87,7 +87,7 @@ app.include_router(auto_bc_router, prefix="/api")
 app.include_router(sync_x3_router, prefix="/api")
 app.include_router(das_non_soldees_router, prefix="/api")
 
-
+ 
 # ──────────────────────────────────────────────────────────
 # Routes de base
 # ──────────────────────────────────────────────────────────
