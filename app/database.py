@@ -13,6 +13,9 @@ from mysql.connector import pooling
 from app.config import settings
 
 
+import pyodbc
+
+
 # ──────────────────────────────────────────────────────────
 # SQLAlchemy Engine (pour ORM si besoin) - Lazy initialization
 # ──────────────────────────────────────────────────────────
@@ -139,3 +142,63 @@ def execute_update(query: str, params: tuple = None) -> int:
     with get_cursor() as cursor:
         cursor.execute(query, params or ())
         return cursor.rowcount
+
+
+
+# ──────────────────────────────────────────────────────────
+# Connexion SQL Server (Sage X3)
+# ──────────────────────────────────────────────────────────
+
+_x3_connection_string = None
+
+
+def get_x3_connection_string():
+    """Construire la chaîne de connexion X3 (lazy)"""
+    global _x3_connection_string
+    if _x3_connection_string is None:
+        _x3_connection_string = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={settings.X3_DB_HOST};"
+            f"DATABASE={settings.X3_DB_NAME};"
+            f"UID={settings.X3_DB_USER};"
+            f"PWD={settings.X3_DB_PASSWORD};"
+        )
+    return _x3_connection_string
+
+
+def get_x3_connection():
+    """Obtenir une nouvelle connexion pyodbc vers X3"""
+    conn = pyodbc.connect(get_x3_connection_string())
+    # Décodage cp1252 utilisé par Sage X3 (résultats retournés par le serveur)
+    conn.setdecoding(pyodbc.SQL_CHAR, encoding='cp1252')
+    conn.setdecoding(pyodbc.SQL_WCHAR, encoding='cp1252')
+    # Ne PAS toucher à l'encodage d'envoi (utf-8) : le driver ODBC 17
+    # attend de l'UTF-16LE via SQLExecDirectW — le laisser par défaut
+    return conn
+
+@contextmanager
+def get_x3_cursor():
+    """Context manager pour exécuter des requêtes sur X3"""
+    conn = get_x3_connection()
+    cursor = conn.cursor()
+    try:
+        yield cursor
+    finally:
+        cursor.close()
+        conn.close()
+ 
+
+def _rows_to_dicts(cursor) -> list[dict]:
+    """Convertir les résultats pyodbc (tuples) en liste de dicts, comme mysql.connector"""
+    columns = [col[0] for col in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def execute_x3_query(query: str, params: tuple = None, fetch_one: bool = False):
+    """Exécuter une requête SELECT sur Sage X3 (SQL Server)"""
+    with get_x3_cursor() as cursor:
+        cursor.execute(query, params or ())
+        results = _rows_to_dicts(cursor)
+        if fetch_one:
+            return results[0] if results else None
+        return results
