@@ -167,6 +167,7 @@ class PreBCDashboardResponse(BaseModel):
 class GenererBCFromPreBCRequest(BaseModel):
     """Demande de generation de BC pour un fournisseur"""
     code_fournisseur: str
+    affaire: Optional[str] = None  # Affaire a inclure dans le BC
     selection_ids: List[int]  # IDs des selections a inclure
     conditions_paiement: Optional[str] = None
     lieu_livraison: Optional[str] = None

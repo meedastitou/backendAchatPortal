@@ -704,7 +704,7 @@ async def generer_bc_from_pre_bc(
             "Code_Article": sel["code_article"],
             "Montant": float(sel["prix_selectionne"]),
             "Marque": marque,
-            "Affaire": ""
+            "Affaire": request.affaire or "",
         })
 
     # Appeler l'API RPA
@@ -716,7 +716,7 @@ async def generer_bc_from_pre_bc(
         "email_expediteur": email_acheteur,
         "headless": True  # Mode headless en production
     }
-    print(rpa_payload)
+    
     rpa_success = False
     rpa_message = ""
 
@@ -732,11 +732,11 @@ async def generer_bc_from_pre_bc(
                 rpa_success = True
                 rpa_message = "Donnees envoyees au RPA avec succes"
                 logging.info(f"RPA API call successful for BC {numero_bc}")
-                print(6)
+
             else:
                 rpa_message = f"Erreur RPA: {response.status_code} - {response.text}"
                 logging.error(f"RPA API error for BC {numero_bc}: {rpa_message}")
-                print(7)
+
     except httpx.TimeoutException:
         rpa_message = "Timeout lors de l'appel RPA"
         logging.error(f"RPA API timeout for BC {numero_bc}")
