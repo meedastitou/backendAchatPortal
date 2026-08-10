@@ -11,7 +11,7 @@ from datetime import datetime, date
 from io import BytesIO
 import requests
 from app.auth.dependencies import get_current_user, get_user_famille_filter
-from app.database import execute_query, execute_insert
+from app.database import execute_query, execute_insert, execute_x3_query
 from app.schemas.rfq import (
     RFQResponse,
     RFQDetailResponse,
@@ -670,6 +670,198 @@ async def export_rfq_filtered(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ──────────────────────────────────────────────────────────
+# DA Non Soldées (depuis Sage X3)
+# ──────────────────────────────────────────────────────────
+
+@router.get("/da-non-solde/list")
+async def get_da_non_soldees(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Récupérer les DA et articles non soldés depuis Sage X3.
+    Requête vers la vue Y_DA_NON_SOLDEES.
+    """
+    query = """
+        SELECT
+            DNS.DA AS numero_da,
+            DNS.Article AS code_article,
+            DNS.DésignationArticle AS designation_article,
+            DNS.QteDA AS quantite,
+            DAD.XMARQ_0 AS marque,
+            DNS.STU_0 AS unite,
+            DNS.Famille AS famille,
+            DAD.LINAPPFLG_0 AS niveau_signature
+        FROM x3.BASE1.Y_DA_NON_SOLDEES DNS
+        LEFT JOIN x3.BASE1.PREQUIS DA ON DA.PSHNUM_0 = DNS.DA
+        INNER JOIN x3.BASE1.PREQUISD DAD
+            ON DAD.PSHNUM_0 = DA.PSHNUM_0 AND DAD.ITMREF_0 = DNS.Article
+        WHERE DA.CLEFLG_0 = 1
+        ORDER BY DNS.DA, DNS.Article
+    """
+
+    try:
+        results = execute_x3_query(query)
+        return {
+            "da_non_soldees": results,
+            "total": len(results)
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la récupération des DA non soldées: {str(e)}"
+        )
+
+
+@router.get("/da-non-solde/rfqs", response_model=RFQListResponse)
+async def list_rfq_da_non_solde(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    statut: Optional[StatutRFQ] = None,
+    code_fournisseur: Optional[str] = None,
+    date_debut: Optional[datetime] = None,
+    date_fin: Optional[datetime] = None,
+    search: Optional[str] = None,
+    code_article: Optional[str] = None,
+    numero_da: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Lister les RFQ qui correspondent aux DA non soldées de X3.
+    Filtre les RFQ dont les lignes de cotation matchent les DA/articles non soldés.
+    """
+
+    # 1. Récupérer les DA non soldées depuis X3
+    x3_query = """
+        SELECT
+            DNS.DA AS numero_da,
+            DNS.Article AS code_article
+        FROM x3.BASE1.Y_DA_NON_SOLDEES DNS
+        LEFT JOIN x3.BASE1.PREQUIS DA ON DA.PSHNUM_0 = DNS.DA
+        INNER JOIN x3.BASE1.PREQUISD DAD
+            ON DAD.PSHNUM_0 = DA.PSHNUM_0 AND DAD.ITMREF_0 = DNS.Article
+        WHERE DA.CLEFLG_0 = 1
+    """
+
+    try:
+        da_non_soldees = execute_x3_query(x3_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur X3: {str(e)}"
+        )
+
+    if not da_non_soldees:
+        return RFQListResponse(rfqs=[], total=0, page=page, limit=limit)
+
+    # 2. Construire les conditions pour filtrer les RFQ
+    conditions = ["1=1"]
+    params = []
+    join_lignes = True  # Toujours requis pour ce filtre
+    join_articles = False
+
+    # Créer la condition pour matcher les DA/articles non soldés
+    da_article_conditions = []
+    for item in da_non_soldees:
+        da_article_conditions.append("(lc.numero_da = %s AND lc.code_article = %s)")
+        params.append(item["numero_da"])
+        params.append(item["code_article"])
+
+    if da_article_conditions:
+        conditions.append(f"({' OR '.join(da_article_conditions)})")
+
+    # Filtrage par famille pour les acheteurs
+    familles_filter = get_user_famille_filter(current_user)
+    if familles_filter is not None:
+        if len(familles_filter) == 0:
+            return RFQListResponse(rfqs=[], total=0, page=page, limit=limit)
+        join_articles = True
+        placeholders = ", ".join(["%s"] * len(familles_filter))
+        conditions.append(f"ar.code_famille IN ({placeholders})")
+        params.extend(familles_filter)
+
+    if statut:
+        conditions.append("dc.statut = %s")
+        params.append(statut.value)
+
+    if code_fournisseur:
+        conditions.append("dc.code_fournisseur = %s")
+        params.append(code_fournisseur)
+
+    if date_debut:
+        conditions.append("dc.date_envoi >= %s")
+        params.append(date_debut)
+
+    if date_fin:
+        conditions.append("dc.date_envoi <= %s")
+        params.append(date_fin)
+
+    if search:
+        conditions.append("(dc.numero_rfq LIKE %s OR f.nom_fournisseur LIKE %s)")
+        search_pattern = f"%{search}%"
+        params.extend([search_pattern, search_pattern])
+
+    if code_article:
+        conditions.append("lc.code_article LIKE %s")
+        params.append(f"%{code_article}%")
+
+    if numero_da:
+        conditions.append("lc.numero_da LIKE %s")
+        params.append(f"%{numero_da}%")
+
+    where_clause = " AND ".join(conditions)
+    lignes_join = "JOIN lignes_cotation lc ON dc.uuid = lc.rfq_uuid"
+    articles_join = "JOIN articles_ref ar ON lc.code_article = ar.code_article" if join_articles else ""
+
+    # Count
+    count_query = f"""
+        SELECT COUNT(DISTINCT dc.id) as total
+        FROM demandes_cotation dc
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        {lignes_join}
+        {articles_join}
+        WHERE {where_clause}
+    """
+    total = execute_query(count_query, tuple(params), fetch_one=True)["total"]
+
+    # Get RFQs
+    offset = (page - 1) * limit
+    query = f"""
+        SELECT DISTINCT
+            dc.*,
+            f.nom_fournisseur,
+            f.email as email_fournisseur
+        FROM demandes_cotation dc
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        {lignes_join}
+        {articles_join}
+        WHERE {where_clause}
+        ORDER BY dc.date_envoi DESC
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+    rfqs = execute_query(query, tuple(params))
+
+    # Ajouter les lignes pour chaque RFQ
+    rfq_responses = []
+    for rfq in rfqs:
+        lignes = execute_query(
+            "SELECT * FROM lignes_cotation WHERE rfq_uuid = %s",
+            (rfq["uuid"],)
+        )
+        rfq_responses.append(RFQResponse(
+            **rfq,
+            lignes=[LigneCotationResponse(**l) for l in lignes]
+        ))
+
+    return RFQListResponse(
+        rfqs=rfq_responses,
+        total=total,
+        page=page,
+        limit=limit
     )
 
 
