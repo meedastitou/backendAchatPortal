@@ -11,7 +11,7 @@ import uuid as uuid_lib
 import logging
 import os
 
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, get_user_famille_filter
 from app.database import execute_query, execute_update, execute_insert
 from app.schemas.reponse import (
     ReponseEnteteResponse,
@@ -407,10 +407,25 @@ async def get_comparaison_dashboard(
 
     Les offres acheteur sont marquées avec is_acheteur=True.
     """
+    join_lignes = False
+    join_articles = False
+    conditions = ["1=1"]
+    params = []
+    # Filtrage par famille pour les acheteurs
+    familles_filter = get_user_famille_filter(current_user)
+    if familles_filter is not None:
+        
+        join_lignes = True
+        join_articles = True
+        placeholders = ", ".join(["%s"] * len(familles_filter))
+        conditions.append(f"ar.code_famille IN ({placeholders})")
+        params.extend(familles_filter)
+    where_clause = " AND ".join(conditions)
+
 
     # Récupérer tous les articles avec réponses fournisseurs
     # Exclure les articles/DA qui ont deja une selection (peu importe le statut)
-    query_fournisseurs = """
+    query_fournisseurs = f"""
         SELECT
             rd.code_article,
             rd.reponse_entete_id,
@@ -443,11 +458,14 @@ async def get_comparaison_dashboard(
               SELECT 1 FROM selections_articles sa
               WHERE sa.code_article = rd.code_article
                 AND sa.numero_da = lc.numero_da
+                AND sa.statut = 'selectionne'
           )
+        AND lc.x3_solde is false
+        AND {where_clause}
         ORDER BY rd.code_article, rd.prix_unitaire_ht ASC
     """
-
-    rows_fournisseurs = execute_query(query_fournisseurs)
+    print(query_fournisseurs)
+    rows_fournisseurs = execute_query(query_fournisseurs, tuple(params))
 
     # Récupérer les réponses acheteur (saisies manuelles)
     query_acheteur = """
@@ -480,6 +498,7 @@ async def get_comparaison_dashboard(
               SELECT 1 FROM selections_articles sa
               WHERE sa.code_article COLLATE utf8mb4_unicode_ci = rd.code_article COLLATE utf8mb4_unicode_ci
                 AND sa.numero_da COLLATE utf8mb4_unicode_ci = lc.numero_da COLLATE utf8mb4_unicode_ci
+                AND sa.statut = 'selectionne'
           )
         ORDER BY rd.code_article, rd.prix_unitaire_ht ASC
     """
