@@ -1192,7 +1192,7 @@ async def preview_auto_bc(
 
         # Vérifier les marques en batch
         resultats_marques = verifier_marques_batch(offres_raw)
-
+        print(resultats_marques)
         offres_apres_marque = []
         for row in offres_raw:
             detail_id = row.get("detail_id") or row.get("id")

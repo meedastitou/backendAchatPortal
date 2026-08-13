@@ -28,8 +28,9 @@ from app.routers import (
     admin_cotations_router,
     auto_bc_router,
     sync_x3_router,
-    das_non_soldees_router
-
+    das_non_soldees_router,
+    n8n_communication_router,
+    analyse_router
 )
 
 
@@ -86,8 +87,10 @@ app.include_router(admin_cotations_router, prefix="/api")
 app.include_router(auto_bc_router, prefix="/api")
 app.include_router(sync_x3_router, prefix="/api")
 app.include_router(das_non_soldees_router, prefix="/api")
+app.include_router(n8n_communication_router, prefix="/api")
+app.include_router(analyse_router, prefix="/api")
 
- 
+
 # ──────────────────────────────────────────────────────────
 # Routes de base
 # ──────────────────────────────────────────────────────────

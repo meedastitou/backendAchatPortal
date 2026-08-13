@@ -15,4 +15,5 @@ from app.routers.admin_cotations import router as admin_cotations_router
 from app.routers.auto_bc import router as auto_bc_router
 from app.routers.sync_x3 import router as sync_x3_router
 from app.routers.das_non_soldees import router as  das_non_soldees_router
- 
+from app.routers.n8n_communication import router as n8n_communication_router
+from app.routers.analyse import router as analyse_router

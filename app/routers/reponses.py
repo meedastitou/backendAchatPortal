@@ -458,7 +458,7 @@ async def get_comparaison_dashboard(
               SELECT 1 FROM selections_articles sa
               WHERE sa.code_article = rd.code_article
                 AND sa.numero_da = lc.numero_da
-                AND sa.statut = 'selectionne'
+                
           )
         AND lc.x3_solde is false
         AND {where_clause}
@@ -498,7 +498,7 @@ async def get_comparaison_dashboard(
               SELECT 1 FROM selections_articles sa
               WHERE sa.code_article COLLATE utf8mb4_unicode_ci = rd.code_article COLLATE utf8mb4_unicode_ci
                 AND sa.numero_da COLLATE utf8mb4_unicode_ci = lc.numero_da COLLATE utf8mb4_unicode_ci
-                AND sa.statut = 'selectionne'
+                
           )
         ORDER BY rd.code_article, rd.prix_unitaire_ht ASC
     """

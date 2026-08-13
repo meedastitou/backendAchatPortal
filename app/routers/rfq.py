@@ -716,6 +716,168 @@ async def get_da_non_soldees(
         )
 
 
+@router.get("/da-non-solde/analyse")
+async def get_da_non_solde_analyse(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Analyse des DA non soldées avec les RFQ associées.
+    Retourne:
+    - DA/articles sans RFQ
+    - RFQ sans réponse
+    - RFQ avec réponse
+    """
+    # 1. Récupérer les DA non soldées depuis X3
+    x3_query = """
+        SELECT
+            DNS.DA, DNS.Article, DNS.DésignationArticle, DNS.QteDA,
+            DAD.XMARQ_0 AS marque, DNS.STU_0 AS Unite, DNS.Famille AS Famille
+        FROM x3.BASE1.Y_DA_NON_SOLDEES DNS
+        LEFT JOIN x3.BASE1.PREQUIS PRQ ON PRQ.PSHNUM_0 = DNS.DA
+        INNER JOIN x3.BASE1.PREQUISD DAD
+            ON DAD.PSHNUM_0 = PRQ.PSHNUM_0 AND DAD.ITMREF_0 = DNS.Article
+        WHERE PRQ.CLEFLG_0 = 1
+        ORDER BY DNS.DA, DNS.Article
+    """
+
+    try:
+        da_non_soldees = execute_x3_query(x3_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur X3: {str(e)}"
+        )
+
+    if not da_non_soldees:
+        return {
+            "da_non_soldees": [],
+            "total_da": 0,
+            "da_sans_rfq": [],
+            "total_sans_rfq": 0,
+            "rfqs_sans_reponse": [],
+            "total_sans_reponse": 0,
+            "rfqs_avec_reponse": [],
+            "total_avec_reponse": 0
+        }
+
+    # 2. Identifier les DA/articles qui ont une RFQ (dans lignes_cotation)
+    # Récupérer toutes les combinaisons DA/article ayant une RFQ
+    da_avec_rfq_query = """
+        SELECT DISTINCT numero_da, code_article
+        FROM lignes_cotation
+    """
+    da_avec_rfq_list = execute_query(da_avec_rfq_query)
+    da_avec_rfq_set = {(item["numero_da"], item["code_article"]) for item in da_avec_rfq_list}
+
+    # 3. Séparer les DA non soldées en deux catégories
+    da_sans_rfq = []
+    da_avec_rfq = []
+
+    for da in da_non_soldees:
+        key = (da["DA"], da["Article"])
+        if key in da_avec_rfq_set:
+            da_avec_rfq.append(da)
+        else:
+            da_sans_rfq.append(da)
+
+    # Si aucune DA n'a de RFQ, retourner
+    if not da_avec_rfq:
+        return {
+            "da_non_soldees": da_non_soldees,
+            "total_da": len(da_non_soldees),
+            "da_sans_rfq": da_sans_rfq,
+            "total_sans_rfq": len(da_sans_rfq),
+            "rfqs_sans_reponse": [],
+            "total_sans_reponse": 0,
+            "rfqs_avec_reponse": [],
+            "total_avec_reponse": 0
+        }
+
+    # 4. Construire la condition pour matcher les DA/articles avec RFQ
+    da_article_conditions = []
+    params = []
+    for item in da_avec_rfq:
+        da_article_conditions.append("(lc.numero_da = %s AND lc.code_article = %s)")
+        params.append(item["DA"])
+        params.append(item["Article"])
+
+    da_filter = f"({' OR '.join(da_article_conditions)})"
+
+    # 5. Récupérer les RFQ SANS réponse (statut: envoye, relance_1, relance_2, relance_3)
+    query_sans_reponse = f"""
+        SELECT DISTINCT
+            dc.id,
+            dc.uuid,
+            dc.numero_rfq,
+            dc.code_fournisseur,
+            f.nom_fournisseur,
+            f.email as email_fournisseur,
+            dc.date_envoi,
+            dc.statut,
+            dc.nb_relances,
+            dc.date_derniere_relance,
+            DATEDIFF(NOW(), dc.date_envoi) as jours_depuis_envoi
+        FROM demandes_cotation dc
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        JOIN lignes_cotation lc ON dc.uuid = lc.rfq_uuid
+        WHERE {da_filter}
+          AND dc.statut IN ('envoye', 'relance_1', 'relance_2', 'relance_3')
+        ORDER BY dc.date_envoi DESC
+    """
+    rfqs_sans_reponse = execute_query(query_sans_reponse, tuple(params))
+
+    # Ajouter les lignes pour chaque RFQ sans réponse
+    for rfq in rfqs_sans_reponse:
+        lignes = execute_query(
+            "SELECT numero_da, code_article, designation_article, quantite_demandee, unite FROM lignes_cotation WHERE rfq_uuid = %s",
+            (rfq["uuid"],)
+        )
+        rfq["lignes"] = lignes
+        rfq["nb_articles"] = len(lignes)
+
+    # 6. Récupérer les RFQ AVEC réponse (statut: repondu)
+    query_avec_reponse = f"""
+        SELECT DISTINCT
+            dc.id,
+            dc.uuid,
+            dc.numero_rfq,
+            dc.code_fournisseur,
+            f.nom_fournisseur,
+            f.email as email_fournisseur,
+            dc.date_envoi,
+            dc.date_reponse,
+            dc.statut,
+            TIMESTAMPDIFF(HOUR, dc.date_envoi, dc.date_reponse) as delai_reponse_heures
+        FROM demandes_cotation dc
+        JOIN fournisseurs f ON dc.code_fournisseur = f.code_fournisseur
+        JOIN lignes_cotation lc ON dc.uuid = lc.rfq_uuid
+        WHERE {da_filter}
+          AND dc.statut = 'repondu'
+        ORDER BY dc.date_reponse DESC
+    """
+    rfqs_avec_reponse = execute_query(query_avec_reponse, tuple(params))
+
+    # Ajouter les lignes pour chaque RFQ avec réponse
+    for rfq in rfqs_avec_reponse:
+        lignes = execute_query(
+            "SELECT numero_da, code_article, designation_article, quantite_demandee, unite FROM lignes_cotation WHERE rfq_uuid = %s",
+            (rfq["uuid"],)
+        )
+        rfq["lignes"] = lignes
+        rfq["nb_articles"] = len(lignes)
+
+    return {
+        "da_non_soldees": da_non_soldees,
+        "total_da": len(da_non_soldees),
+        "da_sans_rfq": da_sans_rfq,
+        "total_sans_rfq": len(da_sans_rfq),
+        "rfqs_sans_reponse": rfqs_sans_reponse,
+        "total_sans_reponse": len(rfqs_sans_reponse),
+        "rfqs_avec_reponse": rfqs_avec_reponse,
+        "total_avec_reponse": len(rfqs_avec_reponse)
+    }
+
+
 @router.get("/da-non-solde/rfqs", response_model=RFQListResponse)
 async def list_rfq_da_non_solde(
     page: int = Query(1, ge=1),
