@@ -30,7 +30,8 @@ from app.routers import (
     sync_x3_router,
     das_non_soldees_router,
     n8n_communication_router,
-    analyse_router
+    analyse_router,
+    annulation_bc_router
 )
 
 
@@ -89,6 +90,7 @@ app.include_router(sync_x3_router, prefix="/api")
 app.include_router(das_non_soldees_router, prefix="/api")
 app.include_router(n8n_communication_router, prefix="/api")
 app.include_router(analyse_router, prefix="/api")
+app.include_router(annulation_bc_router, prefix="/api")
 
 
 # ──────────────────────────────────────────────────────────
