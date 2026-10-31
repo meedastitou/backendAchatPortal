@@ -12,6 +12,7 @@ from enum import Enum
 
 class StatutAnnulation(str, Enum):
     EN_ATTENTE = "en_attente"
+    EN_COURS = "en_cours"
     VALIDEE = "validee"
     REFUSEE = "refusee"
 
