@@ -7,6 +7,7 @@ Permet aux utilisateurs de demander l'annulation d'un BC
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Optional
+import httpx
 
 from app.auth.dependencies import get_current_user
 from app.database import execute_query
@@ -17,6 +18,9 @@ from app.schemas.annulation_bc import (
     AnnulationBCListResponse,
     StatutAnnulation
 )
+
+# URL du webhook n8n pour notification d'annulation
+WEBHOOK_ANNULATION_URL = "https://workflow.jbel-annour.pro/webhook/3ff9d770-bddd-4f66-ae20-f5f799721676"
 
 
 router = APIRouter(prefix="/annulation-bc", tags=["Annulation BC"])
@@ -77,6 +81,21 @@ async def creer_demande_annulation(
         (request.numero_commande.strip(), demande_par),
         fetch_one=True
     )
+
+    # Appeler le webhook n8n pour notification
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.get(
+                WEBHOOK_ANNULATION_URL,
+                params={
+                    "bc": request.numero_commande.strip(),
+                    "id": annulation["id"]
+                },
+                timeout=10.0
+            )
+    except Exception as e:
+        # Log l'erreur mais ne pas bloquer la création
+        print(f"Erreur lors de l'appel au webhook: {e}")
 
     return AnnulationBCResponse(
         success=True,
