@@ -8,10 +8,13 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Optional, List
+import time
+import logging
+from starlette.concurrency import run_in_threadpool
 
 from app.auth.dependencies import get_current_user
-from app.database import execute_query, execute_insert, execute_update, get_cursor
-
+from app.database import execute_query, execute_insert, execute_update, get_cursor,execute_x3_query
+from app.schemas.selection import (AffaireX3)
 # Configuration RPA API
 from app.config import RPA_API_URL
 
@@ -25,7 +28,10 @@ from app.schemas.selection import (
     ArticleSelectionne,
     GenererBCFromPreBCRequest,
     GenererBCFromPreBCResponse,
-    StatutSelection
+    StatutSelection,
+    SuggestionAffaireRequest,
+    SuggestionAffaireResponse,
+    AffaireAlternative,
 )
 from datetime import datetime
 
@@ -722,11 +728,14 @@ async def generer_bc_from_pre_bc(
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
+            print(f"Sending data to RPA API: {rpa_payload}")
+            print(f"RPA API URL: {RPA_API_URL}")
             response = await client.post(
                 RPA_API_URL,
                 json=rpa_payload,
                 headers={"Content-Type": "application/json"}
             )
+            print(f"RPA API response: {response.status_code} - {response.text}")
 
             if response.status_code == 200:
                 rpa_success = True
@@ -761,3 +770,118 @@ async def generer_bc_from_pre_bc(
         montant_total_ht=montant_total_ht,
         montant_total_ttc=montant_total_ttc
     )
+
+
+# ── Requete Sage X3 (une seule par fournisseur) ──────────
+SQL_HISTORIQUE_AFFAIRES = """
+    SELECT PO.PJTH_0 AS affaire,
+           POD.ITMREF_0 AS code_article,
+           MAX(POD.ORDDAT_0) AS derniere_date
+    FROM BASE1.PORDER PO
+    JOIN BASE1.PORDERQ POD ON POD.POHNUM_0 = PO.POHNUM_0
+    WHERE PO.BPSNUM_0 = ?
+      AND PO.PJTH_0 <> ''
+    GROUP BY PO.PJTH_0, POD.ITMREF_0
+"""
+def calculer_suggestion(rows: list, codes_articles: set) -> SuggestionAffaireResponse:
+    # Uniquement les lignes d'historique concernant les articles sélectionnés
+    rows_article = [r for r in rows if r["code_article"] in codes_articles]
+
+    if not rows_article:
+        return SuggestionAffaireResponse(
+            trouvee=False, niveau="aucune",
+            message="Aucune affaire trouvée pour cet article chez ce fournisseur."
+        )
+
+    par_affaire = {}
+    for r in rows_article:
+        a = par_affaire.setdefault(r["affaire"], {"date": r["derniere_date"], "arts": set()})
+        a["arts"].add(r["code_article"])
+        if r["derniere_date"] > a["date"]:
+            a["date"] = r["derniere_date"]
+
+    # Plus récente en premier
+    triees = sorted(par_affaire.items(), key=lambda kv: kv[1]["date"], reverse=True)
+    derniere = triees[0][0]
+
+    articles_trouves = set().union(*(v["arts"] for _, v in triees))
+    nb_sans_affaire = len(codes_articles - articles_trouves)
+
+    msg = f"Affaire « {derniere} » trouvée pour {len(triees[0][1]['arts'])} article(s) déjà commandé(s) chez ce fournisseur."
+    if len(triees) > 1:
+        msg += f" {len(triees)} affaires possibles, la plus récente est utilisée."
+    if nb_sans_affaire:
+        msg += f" {nb_sans_affaire} article(s) sans affaire connue."
+
+    return SuggestionAffaireResponse(
+        trouvee=True, affaire=derniere, niveau="article", nb_affaires=len(triees),
+        alternatives=[AffaireAlternative(
+            affaire=k, derniere_date=str(v["date"])[:10], articles_communs=len(v["arts"])
+        ) for k, v in triees],
+        message=msg
+    )
+
+@router.post("/suggerer-affaire", response_model=SuggestionAffaireResponse)
+async def suggerer_affaire(
+    request: SuggestionAffaireRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    # Articles reels des selections (on ne fait pas confiance au front)
+    ph = ",".join(["%s"] * len(request.selection_ids))
+    sels = execute_query(
+        f"SELECT code_article FROM selections_articles WHERE id IN ({ph}) AND code_fournisseur = %s",
+        tuple(request.selection_ids) + (request.code_fournisseur,)
+    )
+    codes = {s["code_article"] for s in sels}
+
+    try:
+        # adapter au helper SQL Server que vous utilisez deja (pyodbc/pymssql)
+        rows = await run_in_threadpool(execute_x3_query, SQL_HISTORIQUE_AFFAIRES, (request.code_fournisseur,))
+    except Exception as e:
+        logging.error(f"Suggestion affaire X3 KO: {e}")
+        return SuggestionAffaireResponse(
+            trouvee=False, niveau="aucune",
+            message="Impossible de consulter l'historique Sage X3. Veuillez saisir l'affaire."
+        )
+    return calculer_suggestion(rows, codes)
+
+
+
+
+SQL_LISTE_AFFAIRES = """
+    SELECT OPPNUM_0 AS numero_affaire,
+           OPPCMP_0 AS code_tier,
+           BPRNAM_0 AS raison
+    FROM BASE1.XAFFR
+    WHERE OPPCMP_0 <> ''
+    ORDER BY OPPNUM_0 DESC
+"""
+
+# Cache mémoire : la liste change peu, inutile d'interroger X3 à chaque ouverture de modale
+_CACHE_AFFAIRES = {"ts": 0.0, "data": []}
+_CACHE_TTL_SECONDES = 600  # 10 minutes
+
+
+@router.get("/liste-affaires", response_model=List[AffaireX3])
+async def liste_affaires(current_user: dict = Depends(get_current_user)):
+    """Liste des affaires X3, proposée quand aucune affaire n'est trouvée dans l'historique."""
+    maintenant = time.time()
+    if _CACHE_AFFAIRES["data"] and maintenant - _CACHE_AFFAIRES["ts"] < _CACHE_TTL_SECONDES:
+        return _CACHE_AFFAIRES["data"]
+
+    try:
+        rows = await run_in_threadpool(execute_x3_query, SQL_LISTE_AFFAIRES)
+    except Exception as e:
+        logging.error(f"Liste affaires X3 KO: {e}")
+        return _CACHE_AFFAIRES["data"]   # dernière liste connue, ou vide
+
+    data = [
+        AffaireX3(
+            numero_affaire=str(r["numero_affaire"]).strip(),
+            code_tier=str(r["code_tier"]).strip(),
+            raison=(str(r["raison"]).strip() if r.get("raison") else None),
+        )
+        for r in rows
+    ]
+    _CACHE_AFFAIRES.update(ts=maintenant, data=data)
+    return data
