@@ -184,3 +184,28 @@ class GenererBCFromPreBCResponse(BaseModel):
     nb_lignes: Optional[int] = None
     montant_total_ht: Optional[float] = None
     montant_total_ttc: Optional[float] = None
+
+
+# ── Schemas ──────────────────────────────────────────────
+class SuggestionAffaireRequest(BaseModel):
+    code_fournisseur: str
+    selection_ids: List[int]
+
+class AffaireAlternative(BaseModel):
+    affaire: str
+    derniere_date: Optional[str] = None
+    articles_communs: int = 0
+
+class SuggestionAffaireResponse(BaseModel):
+    trouvee: bool
+    affaire: Optional[str] = None
+    niveau: str                      # "article" | "fournisseur" | "aucune"
+    nb_affaires: int = 0
+    alternatives: List[AffaireAlternative] = []
+    message: str
+
+
+class AffaireX3(BaseModel):
+    numero_affaire: str
+    code_tier: str
+    raison: Optional[str] = None
