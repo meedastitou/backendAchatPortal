@@ -773,78 +773,79 @@ async def generer_bc_from_pre_bc(
 
 
 # ── Requete Sage X3 (une seule par fournisseur) ──────────
-SQL_HISTORIQUE_AFFAIRES = """
-    SELECT PO.PJTH_0 AS affaire,
-           POD.ITMREF_0 AS code_article,
-           MAX(POD.ORDDAT_0) AS derniere_date
+SQL_DERNIERE_COMMANDE  = """
+    SELECT TOP 1
+           PO.POHNUM_0                       AS num_commande,
+           NULLIF(LTRIM(RTRIM(PO.PJTH_0)), '') AS affaire,
+           PO.ORDDAT_0                       AS date_cmd
     FROM BASE1.PORDER PO
-    JOIN BASE1.PORDERQ POD ON POD.POHNUM_0 = PO.POHNUM_0
     WHERE PO.BPSNUM_0 = ?
-      AND PO.PJTH_0 <> ''
-    GROUP BY PO.PJTH_0, POD.ITMREF_0
+    ORDER BY PO.ORDDAT_0 DESC, PO.POHNUM_0 DESC
 """
-def calculer_suggestion(rows: list, codes_articles: set) -> SuggestionAffaireResponse:
-    # Uniquement les lignes d'historique concernant les articles sélectionnés
-    rows_article = [r for r in rows if r["code_article"] in codes_articles]
-
-    if not rows_article:
+def calculer_suggestion(rows: list) -> SuggestionAffaireResponse:
+    # Jamais commandé chez ce fournisseur
+    if not rows:
         return SuggestionAffaireResponse(
-            trouvee=False, niveau="aucune",
-            message="Aucune affaire trouvée pour cet article chez ce fournisseur."
+            trouvee=False, affaire=None, niveau="aucune",
+            nb_affaires=0, alternatives=[],
+            message="Aucune commande trouvée chez ce fournisseur."
         )
 
-    par_affaire = {}
-    for r in rows_article:
-        a = par_affaire.setdefault(r["affaire"], {"date": r["derniere_date"], "arts": set()})
-        a["arts"].add(r["code_article"])
-        if r["derniere_date"] > a["date"]:
-            a["date"] = r["derniere_date"]
+    r = rows[0]
 
-    # Plus récente en premier
-    triees = sorted(par_affaire.items(), key=lambda kv: kv[1]["date"], reverse=True)
-    derniere = triees[0][0]
+    # Dernière commande sans affaire -> on ne propose rien
+    if not r["affaire"]:
+        return SuggestionAffaireResponse(
+            trouvee=False, affaire=None, niveau="aucune",
+            nb_affaires=0, alternatives=[],
+            message=f"La dernière commande de ce fournisseur ({r['num_commande']}) était sans affaire."
+        )
 
-    articles_trouves = set().union(*(v["arts"] for _, v in triees))
-    nb_sans_affaire = len(codes_articles - articles_trouves)
-
-    msg = f"Affaire « {derniere} » trouvée pour {len(triees[0][1]['arts'])} article(s) déjà commandé(s) chez ce fournisseur."
-    if len(triees) > 1:
-        msg += f" {len(triees)} affaires possibles, la plus récente est utilisée."
-    if nb_sans_affaire:
-        msg += f" {nb_sans_affaire} article(s) sans affaire connue."
-
+    # Dernière commande avec affaire -> on la propose
     return SuggestionAffaireResponse(
-        trouvee=True, affaire=derniere, niveau="article", nb_affaires=len(triees),
+        trouvee=True, affaire=r["affaire"], niveau="fournisseur", nb_affaires=1,
         alternatives=[AffaireAlternative(
-            affaire=k, derniere_date=str(v["date"])[:10], articles_communs=len(v["arts"])
-        ) for k, v in triees],
-        message=msg
+            affaire=r["affaire"],
+            derniere_date=str(r["date_cmd"])[:10],
+            articles_communs=0
+        )],
+        message=f"Affaire « {r['affaire']} » utilisée sur la dernière commande de ce fournisseur ({r['num_commande']})."
     )
+
+import logging
+import time
+from fastapi.concurrency import run_in_threadpool
+
+logger = logging.getLogger("uvicorn.error")
+
 
 @router.post("/suggerer-affaire", response_model=SuggestionAffaireResponse)
 async def suggerer_affaire(
     request: SuggestionAffaireRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    # Articles reels des selections (on ne fait pas confiance au front)
-    ph = ",".join(["%s"] * len(request.selection_ids))
-    sels = execute_query(
-        f"SELECT code_article FROM selections_articles WHERE id IN ({ph}) AND code_fournisseur = %s",
-        tuple(request.selection_ids) + (request.code_fournisseur,)
-    )
-    codes = {s["code_article"] for s in sels}
+    t0 = time.perf_counter()
+    logger.info(f"[SUGG] DEBUT fournisseur={request.code_fournisseur}")
+    logger.info(f"[SUGG] nb de ? dans la requete: {SQL_DERNIERE_COMMANDE.count('?')} (attendu: 1)")
 
     try:
-        # adapter au helper SQL Server que vous utilisez deja (pyodbc/pymssql)
-        rows = await run_in_threadpool(execute_x3_query, SQL_HISTORIQUE_AFFAIRES, (request.code_fournisseur,))
+        rows = await run_in_threadpool(
+            execute_x3_query, SQL_DERNIERE_COMMANDE, (request.code_fournisseur,)
+        )
     except Exception as e:
-        logging.error(f"Suggestion affaire X3 KO: {e}")
+        logger.error(f"[SUGG] X3 KO: {type(e).__name__}: {e}", exc_info=True)
         return SuggestionAffaireResponse(
-            trouvee=False, niveau="aucune",
+            trouvee=False, affaire=None, niveau="aucune",
+            nb_affaires=0, alternatives=[],
             message="Impossible de consulter l'historique Sage X3. Veuillez saisir l'affaire."
         )
-    return calculer_suggestion(rows, codes)
 
+    logger.info(f"[SUGG] X3: {len(rows)} ligne(s) -> {rows}")
+
+    resultat = calculer_suggestion(rows)
+    logger.info(f"[SUGG] RESULTAT trouvee={resultat.trouvee} affaire={resultat.affaire} "
+                f"| {resultat.message} | {time.perf_counter()-t0:.2f}s")
+    return resultat
 
 
 
