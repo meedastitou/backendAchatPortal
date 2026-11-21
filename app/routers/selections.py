@@ -11,6 +11,8 @@ from typing import Optional, List
 import time
 import logging
 from starlette.concurrency import run_in_threadpool
+from datetime import datetime, date
+from decimal import Decimal
 
 from app.auth.dependencies import get_current_user
 from app.database import execute_query, execute_insert, execute_update, get_cursor,execute_x3_query
@@ -38,6 +40,9 @@ from datetime import datetime
 
 router = APIRouter(prefix="/selections", tags=["Selections Articles"])
 
+
+# Si aucun tarif valide n'existe pour un article : True = bloquer, False = ignorer
+BLOQUER_SI_TARIF_ABSENT = True
 
 # ──────────────────────────────────────────────────────────
 # Selection automatique (meilleur prix)
@@ -555,6 +560,151 @@ async def get_pre_bc_dashboard(
     )
 
 
+
+
+
+
+def _row_get(row, key, idx=0):
+    """Lit une valeur dans une ligne dict ou tuple/Row pyodbc."""
+    if isinstance(row, dict):
+        return row.get(key)
+    return row[idx]
+
+
+def _to_date(value) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _marque_a_envoyer(sel: dict) -> str:
+    """Marque réellement envoyée au RPA (même règle qu'avant)."""
+    if sel["marque_conforme"]:
+        return sel.get("marque_demandee") or sel.get("marque_proposee") or ""
+    return sel.get("marque_proposee") or ""
+
+
+def _article_signe_dans_da(numero_da: str, code_article: str) -> Optional[bool]:
+    """True si toutes les lignes de l'article dans la DA ont LINAPPFLG_0 = 3.
+    None si l'article est absent de la DA."""
+    rows = execute_x3_query(
+        """
+        SELECT LINAPPFLG_0
+        FROM BASE1.PREQUISD
+        WHERE PSHNUM_0 = ? AND ITMREF_0 = ?
+        """,
+        (numero_da, code_article)
+    )
+    if not rows:
+        return None
+    return all(int(_row_get(r, "LINAPPFLG_0") or 0) == 3 for r in rows)
+
+
+def _tarif_max_valide(code_article: str, today: date) -> Optional[Decimal]:
+    """Tarif valide à la date du jour (le plus élevé si plusieurs périodes se chevauchent)."""
+    rows = execute_x3_query(
+        """
+        SELECT PLICRI1_0, PRI_0, PLISTRDAT_0, PLIENDDAT_0
+        FROM BASE1.PPRICLIST
+        WHERE PLICRI1_0 = ?
+        """,
+        (code_article,)
+    )
+    tarifs = []
+    for r in rows or []:
+        debut = _to_date(_row_get(r, "PLISTRDAT_0", 2))
+        fin = _to_date(_row_get(r, "PLIENDDAT_0", 3))
+        # X3 utilise 1753-01-01 comme "date vide"
+        if debut and debut.year <= 1753:
+            debut = None
+        if fin and fin.year <= 1753:
+            fin = None
+        if (debut is None or debut <= today) and (fin is None or fin >= today):
+            tarifs.append(Decimal(str(_row_get(r, "PRI_0", 1))))
+    return max(tarifs) if tarifs else None
+
+
+def _marques_article(code_article: str) -> list:
+    rows = execute_x3_query(
+        "SELECT XART_0, XMARQ_0 FROM BASE1.XMRQART WHERE XART_0 = ?",
+        (code_article,)
+    )
+    return [_row_get(r, "XMARQ_0", 1) for r in (rows or []) if _row_get(r, "XMARQ_0", 1) is not None]
+
+
+def verifier_selections_avant_bc(selections: list) -> list:
+    """Retourne la liste des erreurs (liste vide = tout est OK)."""
+    erreurs = []
+    today = date.today()
+    cache_tarif, cache_marques = {}, {}
+
+    for sel in selections:
+        da = sel["numero_da"]
+        art = sel["code_article"]
+        prefixe = f"[{da} / {art}]"
+
+        # 1. Signature de l'article dans la DA
+        try:
+            signe = _article_signe_dans_da(da, art)
+            if signe is None:
+                erreurs.append(f"{prefixe} article introuvable dans la DA")
+            elif not signe:
+                erreurs.append(f"{prefixe} ligne non signée (LINAPPFLG_0 différent de 3)")
+        except Exception as e:
+            logging.error(f"Vérif signature {da}/{art}: {e}")
+            erreurs.append(f"{prefixe} impossible de vérifier la signature (erreur X3)")
+
+        # 2. Prix <= tarif max valide
+        try:
+            if art not in cache_tarif:
+                cache_tarif[art] = _tarif_max_valide(art, today)
+            tarif = cache_tarif[art]
+            prix = Decimal(str(sel["prix_selectionne"]))
+            if tarif is None:
+                if BLOQUER_SI_TARIF_ABSENT:
+                    erreurs.append(f"{prefixe} aucun tarif valide au {today:%d/%m/%Y} dans Sage")
+            elif prix > tarif:
+                erreurs.append(f"{prefixe} prix {prix} supérieur au tarif max {tarif}")
+        except Exception as e:
+            logging.error(f"Vérif tarif {art}: {e}")
+            erreurs.append(f"{prefixe} impossible de vérifier le tarif (erreur X3)")
+
+        # 3. Marque (comparaison EXACTE : casse et espaces)
+        try:
+            marque = _marque_a_envoyer(sel)
+            if art not in cache_marques:
+                cache_marques[art] = _marques_article(art)
+            marques = cache_marques[art]
+
+            if not marques:
+                erreurs.append(f"{prefixe} aucune marque référencée dans Sage pour cet article")
+            elif marque not in marques:
+                # Aide au diagnostic : même marque mais écriture différente ?
+                proche = next(
+                    (m for m in marques if m.strip().lower() == marque.strip().lower()),
+                    None
+                )
+                if proche is not None:
+                    erreurs.append(
+                        f"{prefixe} marque '{marque}' écrite différemment de Sage : '{proche}'"
+                    )
+                else:
+                    erreurs.append(
+                        f"{prefixe} marque '{marque}' absente de la liste Sage ({', '.join(marques)})"
+                    )
+        except Exception as e:
+            logging.error(f"Vérif marque {art}: {e}")
+            erreurs.append(f"{prefixe} impossible de vérifier la marque (erreur X3)")
+
+    return erreurs
+
 # ──────────────────────────────────────────────────────────
 # Generation BC depuis Pre-BC
 # ──────────────────────────────────────────────────────────
@@ -590,6 +740,12 @@ async def generer_bc_from_pre_bc(
     """
     params = tuple(request.selection_ids) + (request.code_fournisseur,)
     selections = execute_query(query, params)
+    erreurs = verifier_selections_avant_bc(selections)
+    if erreurs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Vérifications échouées :\n- " + "\n- ".join(erreurs)
+        )
     if len(selections) != len(request.selection_ids):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -696,10 +852,7 @@ async def generer_bc_from_pre_bc(
 
     for sel in selections:
         # Si marque conforme -> envoyer marque demandee, sinon marque proposee
-        if sel["marque_conforme"]:
-            marque = sel["marque_demandee"] or sel["marque_proposee"] or ""
-        else:
-            marque = sel["marque_proposee"] or ""
+        marque = _marque_a_envoyer(sel)
 
         donnees_rpa.append({
             "Numero_DA": sel["numero_da"],
