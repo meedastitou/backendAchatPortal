@@ -561,9 +561,6 @@ async def get_pre_bc_dashboard(
 
 
 
-
-
-
 def _row_get(row, key, idx=0):
     """Lit une valeur dans une ligne dict ou tuple/Row pyodbc."""
     if isinstance(row, dict):
@@ -656,7 +653,7 @@ def verifier_selections_avant_bc(selections: list) -> list:
             if signe is None:
                 erreurs.append(f"{prefixe} article introuvable dans la DA")
             elif not signe:
-                erreurs.append(f"{prefixe} ligne non signée (LINAPPFLG_0 différent de 3)")
+                erreurs.append(f"{prefixe} ligne non signée ")
         except Exception as e:
             logging.error(f"Vérif signature {da}/{art}: {e}")
             erreurs.append(f"{prefixe} impossible de vérifier la signature (erreur X3)")
